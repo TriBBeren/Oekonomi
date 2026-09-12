@@ -1,7 +1,10 @@
 import os
+import json
+import base64
 import logging
-from datetime import datetime, timezone
-from urllib.parse import urlencode
+import subprocess
+import uuid
+from datetime import datetime, timezone, timedelta
 
 import requests
 from fastapi import FastAPI, Request
@@ -29,13 +32,35 @@ ENABLE_BANKING_API_URL = os.getenv(
     "https://api.enablebanking.com"
 ).rstrip("/")
 
-ENABLE_BANKING_APP_ID = os.getenv("ENABLE_BANKING_APP_ID", "")
+ENABLE_BANKING_APP_ID = os.getenv(
+    "ENABLE_BANKING_APP_ID",
+    ""
+)
+
 ENABLE_BANKING_PRIVATE_KEY = os.getenv(
     "ENABLE_BANKING_PRIVATE_KEY",
     "/etc/secrets/enable_banking_private_key.pem"
 )
 
-CRON_SECRET = os.getenv("CRON_SECRET", "")
+ENABLE_BANKING_BANK_NAME = os.getenv(
+    "ENABLE_BANKING_BANK_NAME",
+    "Danske Andelskassers Bank"
+)
+
+ENABLE_BANKING_BANK_COUNTRY = os.getenv(
+    "ENABLE_BANKING_BANK_COUNTRY",
+    "DK"
+)
+
+ENABLE_BANKING_PSU_TYPE = os.getenv(
+    "ENABLE_BANKING_PSU_TYPE",
+    "personal"
+)
+
+CRON_SECRET = os.getenv(
+    "CRON_SECRET",
+    ""
+)
 
 APP_URL = os.getenv(
     "APP_URL",
@@ -43,7 +68,11 @@ APP_URL = os.getenv(
 ).rstrip("/")
 
 AUTH_COOKIE = "oekonomi_auth"
-AUTH_VALUE = os.getenv("AUTH_VALUE", "1")
+
+AUTH_VALUE = os.getenv(
+    "AUTH_VALUE",
+    "1"
+)
 
 
 # ============================================================
@@ -54,7 +83,7 @@ app = FastAPI()
 
 
 # ============================================================
-# ENABLE BANKING SESSION
+# SESSION STATE
 # ============================================================
 
 current_session = None
@@ -78,42 +107,195 @@ def supabase_url(table):
 
 
 # ============================================================
+# ENABLE BANKING JWT
+# ============================================================
+
+def base64url_encode(data):
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def create_enable_banking_jwt():
+    """
+    Opretter en Enable Banking JWT.
+
+    Enable Banking kræver:
+      iss = enablebanking.com
+      aud = api.enablebanking.com
+      iat = nu
+      exp = maks 24 timer frem
+
+    JWT signeres med appens private RSA-nøgle
+    ved hjælp af RS256.
+    """
+
+    if not ENABLE_BANKING_APP_ID:
+        raise Exception(
+            "ENABLE_BANKING_APP_ID mangler"
+        )
+
+    if not os.path.exists(
+        ENABLE_BANKING_PRIVATE_KEY
+    ):
+        raise Exception(
+            "Enable Banking private key findes ikke: "
+            f"{ENABLE_BANKING_PRIVATE_KEY}"
+        )
+
+    now = int(
+        datetime.now(timezone.utc).timestamp()
+    )
+
+    # 1 time.
+    # Det ligger sikkert under Enable Bankings
+    # maksimale TTL på 24 timer.
+    exp = now + 3600
+
+    header = {
+        "typ": "JWT",
+        "alg": "RS256",
+        "kid": ENABLE_BANKING_APP_ID,
+    }
+
+    payload = {
+        "iss": "enablebanking.com",
+        "aud": "api.enablebanking.com",
+        "iat": now,
+        "exp": exp,
+    }
+
+    header_encoded = base64url_encode(
+        json.dumps(
+            header,
+            separators=(",", ":")
+        ).encode("utf-8")
+    )
+
+    payload_encoded = base64url_encode(
+        json.dumps(
+            payload,
+            separators=(",", ":")
+        ).encode("utf-8")
+    )
+
+    signing_input = (
+        f"{header_encoded}.{payload_encoded}"
+    ).encode("ascii")
+
+    try:
+        result = subprocess.run(
+            [
+                "openssl",
+                "dgst",
+                "-sha256",
+                "-sign",
+                ENABLE_BANKING_PRIVATE_KEY,
+            ],
+            input=signing_input,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+            timeout=30,
+        )
+    except subprocess.CalledProcessError as exc:
+        error_text = (
+            exc.stderr.decode(
+                "utf-8",
+                errors="replace"
+            )
+        )
+
+        raise Exception(
+            "Kunne ikke signere Enable Banking JWT: "
+            + error_text
+        )
+
+    signature_encoded = base64url_encode(
+        result.stdout
+    )
+
+    token = (
+        f"{header_encoded}."
+        f"{payload_encoded}."
+        f"{signature_encoded}"
+    )
+
+    return token
+
+
+def enable_headers():
+    """
+    Headers til alle Enable Banking API-kald.
+    """
+
+    jwt = create_enable_banking_jwt()
+
+    return {
+        "Authorization": f"Bearer {jwt}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+
+# ============================================================
 # BANK SESSION
 # ============================================================
 
 def save_bank_session(session_data):
+
     if not session_data:
         return
 
-    session_id = session_data.get("session_id")
+    session_id = session_data.get(
+        "session_id"
+    )
 
     if not session_id:
-        logger.warning("Bank session mangler session_id")
+        logger.warning(
+            "Bank session mangler session_id"
+        )
         return
 
     payload = {
         "session_id": session_id,
         "session_data": session_data,
         "status": "active",
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": (
+            datetime.now(
+                timezone.utc
+            ).isoformat()
+        ),
     }
 
     response = requests.post(
         supabase_url("bank_sessions"),
         headers={
             **supabase_headers(),
-            "Prefer": "resolution=merge-duplicates,return=minimal",
+            "Prefer": (
+                "resolution=merge-duplicates,"
+                "return=minimal"
+            ),
         },
         json=payload,
         timeout=30,
     )
 
+    if not response.ok:
+        logger.error(
+            "Fejl ved gemning af bank session: "
+            "%s %s",
+            response.status_code,
+            response.text,
+        )
+
     response.raise_for_status()
 
-    logger.info("Bank session gemt i Supabase")
+    logger.info(
+        "Bank session gemt i Supabase"
+    )
 
 
 def load_bank_session():
+
     response = requests.get(
         supabase_url("bank_sessions"),
         headers=supabase_headers(),
@@ -130,13 +312,20 @@ def load_bank_session():
     rows = response.json()
 
     if not rows:
-        logger.warning("Ingen aktiv bank session fundet")
+        logger.warning(
+            "Ingen aktiv bank session fundet"
+        )
         return None
 
-    session_data = rows[0].get("session_data")
+    session_data = rows[0].get(
+        "session_data"
+    )
 
     if not session_data:
-        logger.warning("Bank session eksisterer, men session_data mangler")
+        logger.warning(
+            "Bank session eksisterer, "
+            "men session_data mangler"
+        )
         return None
 
     return session_data
@@ -147,25 +336,16 @@ def load_bank_session():
 # ============================================================
 
 def save_account(account):
-    """
-    Gem eller opdater én konto.
-
-    Vi bruger ikke Supabase upsert her.
-    I stedet:
-      1. Findes uid allerede -> PATCH
-      2. Findes uid ikke -> POST
-
-    Det undgår 409 Conflict-problemet på accounts.
-    """
 
     uid = account.get("uid")
     iban = account.get("iban")
 
     if not uid:
-        logger.warning("Springer konto over uden uid")
+        logger.warning(
+            "Springer konto over uden uid"
+        )
         return False
 
-    # Konti uden IBAN skal ikke gemmes.
     if not iban:
         logger.info(
             "Springer konto over uden IBAN: %s",
@@ -178,14 +358,18 @@ def save_account(account):
         "iban": iban,
         "name": account.get("name"),
         "currency": account.get("currency"),
-        "last_balance": account.get("last_balance"),
-        "balance_type": account.get("balance_type"),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "last_balance": account.get(
+            "last_balance"
+        ),
+        "balance_type": account.get(
+            "balance_type"
+        ),
+        "updated_at": (
+            datetime.now(
+                timezone.utc
+            ).isoformat()
+        ),
     }
-
-    # --------------------------------------------------------
-    # Find eksisterende konto
-    # --------------------------------------------------------
 
     lookup = requests.get(
         supabase_url("accounts"),
@@ -202,11 +386,8 @@ def save_account(account):
 
     existing = lookup.json()
 
-    # --------------------------------------------------------
-    # Konto findes -> PATCH
-    # --------------------------------------------------------
-
     if existing:
+
         response = requests.patch(
             supabase_url("accounts"),
             headers=supabase_headers(),
@@ -219,7 +400,8 @@ def save_account(account):
 
         if not response.ok:
             logger.error(
-                "Fejl ved opdatering af konto %s: %s %s",
+                "Fejl ved opdatering af konto %s: "
+                "%s %s",
                 uid,
                 response.status_code,
                 response.text,
@@ -234,10 +416,6 @@ def save_account(account):
 
         return True
 
-    # --------------------------------------------------------
-    # Konto findes ikke -> INSERT
-    # --------------------------------------------------------
-
     response = requests.post(
         supabase_url("accounts"),
         headers={
@@ -250,7 +428,8 @@ def save_account(account):
 
     if not response.ok:
         logger.error(
-            "Fejl ved oprettelse af konto %s: %s %s",
+            "Fejl ved oprettelse af konto %s: "
+            "%s %s",
             uid,
             response.status_code,
             response.text,
@@ -271,52 +450,81 @@ def save_account(account):
 # ============================================================
 
 def save_transaction(transaction):
-    """
-    Gem én transaktion.
 
-    account_uid + transaction_id er unik nøgle i databasen.
-    """
+    account_uid = transaction.get(
+        "account_uid"
+    )
 
-    account_uid = transaction.get("account_uid")
-    transaction_id = transaction.get("transaction_id")
+    transaction_id = transaction.get(
+        "transaction_id"
+    )
 
     if not account_uid or not transaction_id:
         logger.warning(
-            "Springer transaktion over uden account_uid/transaction_id"
+            "Springer transaktion over uden "
+            "account_uid/transaction_id"
         )
         return False
 
     payload = {
         "account_uid": account_uid,
         "transaction_id": transaction_id,
-        "booking_date": transaction.get("booking_date"),
-        "value_date": transaction.get("value_date"),
-        "amount": transaction.get("amount"),
-        "currency": transaction.get("currency"),
-        "creditor": transaction.get("creditor"),
-        "debtor": transaction.get("debtor"),
-        "description": transaction.get("description"),
-        "category": transaction.get("category"),
-        "raw_data": transaction.get("raw_data"),
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "booking_date": transaction.get(
+            "booking_date"
+        ),
+        "value_date": transaction.get(
+            "value_date"
+        ),
+        "amount": transaction.get(
+            "amount"
+        ),
+        "currency": transaction.get(
+            "currency"
+        ),
+        "creditor": transaction.get(
+            "creditor"
+        ),
+        "debtor": transaction.get(
+            "debtor"
+        ),
+        "description": transaction.get(
+            "description"
+        ),
+        "category": transaction.get(
+            "category"
+        ),
+        "raw_data": transaction.get(
+            "raw_data"
+        ),
+        "created_at": (
+            datetime.now(
+                timezone.utc
+            ).isoformat()
+        ),
     }
 
     response = requests.post(
         supabase_url("transactions"),
         headers={
             **supabase_headers(),
-            "Prefer": "resolution=merge-duplicates,return=minimal",
+            "Prefer": (
+                "resolution=merge-duplicates,"
+                "return=minimal"
+            ),
         },
         json=payload,
         params={
-            "on_conflict": "account_uid,transaction_id",
+            "on_conflict": (
+                "account_uid,transaction_id"
+            ),
         },
         timeout=30,
     )
 
     if not response.ok:
         logger.error(
-            "Fejl ved transaktion %s: %s %s",
+            "Fejl ved transaktion %s: "
+            "%s %s",
             transaction_id,
             response.status_code,
             response.text,
@@ -331,57 +539,100 @@ def save_transaction(transaction):
 # ENABLE BANKING API
 # ============================================================
 
-def get_accounts(session):
+def get_session_accounts(session):
 
-    session_id = session.get("session_id")
+    accounts = session.get(
+        "accounts",
+        []
+    )
 
-    if not session_id:
-        raise Exception("Session mangler session_id")
+    if not isinstance(
+        accounts,
+        list
+    ):
+        raise Exception(
+            "Enable Banking session indeholder "
+            "ikke en gyldig accounts-liste"
+        )
+
+    return accounts
+
+
+def get_account_details(
+    account_uid
+):
 
     response = requests.get(
-        f"{ENABLE_BANKING_API_URL}/accounts",
-        headers={
-            "Authorization": f"Bearer {session_id}",
-            "Accept": "application/json",
-        },
+        (
+            f"{ENABLE_BANKING_API_URL}"
+            f"/accounts/{account_uid}/details"
+        ),
+        headers=enable_headers(),
         timeout=60,
     )
+
+    if not response.ok:
+        logger.error(
+            "Enable Banking details-fejl for %s: "
+            "%s %s",
+            account_uid,
+            response.status_code,
+            response.text,
+        )
 
     response.raise_for_status()
 
     return response.json()
 
 
-def get_account_balance(session, account_uid):
-
-    session_id = session.get("session_id")
+def get_account_balance(
+    account_uid
+):
 
     response = requests.get(
-        f"{ENABLE_BANKING_API_URL}/accounts/{account_uid}/balances",
-        headers={
-            "Authorization": f"Bearer {session_id}",
-            "Accept": "application/json",
-        },
+        (
+            f"{ENABLE_BANKING_API_URL}"
+            f"/accounts/{account_uid}/balances"
+        ),
+        headers=enable_headers(),
         timeout=60,
     )
+
+    if not response.ok:
+        logger.error(
+            "Enable Banking balance-fejl for %s: "
+            "%s %s",
+            account_uid,
+            response.status_code,
+            response.text,
+        )
 
     response.raise_for_status()
 
     return response.json()
 
 
-def get_account_transactions(session, account_uid):
-
-    session_id = session.get("session_id")
+def get_account_transactions(
+    account_uid
+):
 
     response = requests.get(
-        f"{ENABLE_BANKING_API_URL}/accounts/{account_uid}/transactions",
-        headers={
-            "Authorization": f"Bearer {session_id}",
-            "Accept": "application/json",
-        },
+        (
+            f"{ENABLE_BANKING_API_URL}"
+            f"/accounts/{account_uid}/transactions"
+        ),
+        headers=enable_headers(),
         timeout=60,
     )
+
+    if not response.ok:
+        logger.error(
+            "Enable Banking transaction-fejl for %s: "
+            "%s %s",
+            account_uid,
+            response.status_code,
+            response.text,
+        )
 
     response.raise_for_status()
 
@@ -396,47 +647,40 @@ def perform_sync():
 
     global current_session
 
-    logger.info("Starter bank sync")
-
-    # --------------------------------------------------------
-    # Hent session
-    # --------------------------------------------------------
+    logger.info(
+        "Starter bank sync"
+    )
 
     session = current_session
 
     if not session:
+
         logger.info(
-            "Ingen session i RAM - henter fra Supabase"
+            "Ingen session i RAM - "
+            "henter fra Supabase"
         )
+
         session = load_bank_session()
 
     if not session:
-        raise Exception("Ingen aktiv bank session")
+        raise Exception(
+            "Ingen aktiv bank session"
+        )
 
     current_session = session
 
     # --------------------------------------------------------
-    # Hent konti
+    # Konti kommer fra den autoriserede session
     # --------------------------------------------------------
 
-    accounts_response = get_accounts(session)
-
-    if isinstance(accounts_response, dict):
-        accounts = accounts_response.get(
-            "accounts",
-            []
-        )
-    else:
-        accounts = accounts_response
-
-    logger.info(
-        "Enable Banking returnerede %s konti",
-        len(accounts)
+    accounts = get_session_accounts(
+        session
     )
 
-    # --------------------------------------------------------
-    # Statistik
-    # --------------------------------------------------------
+    logger.info(
+        "Enable Banking session indeholder %s konti",
+        len(accounts)
+    )
 
     saved_accounts = 0
     skipped_accounts = 0
@@ -454,20 +698,37 @@ def perform_sync():
             logger.warning(
                 "Konto uden uid springes over"
             )
+
             skipped_accounts += 1
             continue
 
-        iban = account.get("iban")
+        # ----------------------------------------------------
+        # IBAN
+        # ----------------------------------------------------
 
-        # ----------------------------------------------------
-        # Konti uden IBAN skal ikke med i vores økonomi
-        # ----------------------------------------------------
+        account_id = account.get(
+            "account_id",
+            {}
+        )
+
+        iban = account.get(
+            "iban"
+        )
+
+        if not iban and isinstance(
+            account_id,
+            dict
+        ):
+            iban = account_id.get(
+                "iban"
+            )
 
         if not iban:
             logger.info(
-                "Springer konto uden IBAN over: %s",
+                "Konto uden IBAN springes over: %s",
                 uid
             )
+
             skipped_accounts += 1
             continue
 
@@ -478,8 +739,12 @@ def perform_sync():
         account_data = {
             "uid": uid,
             "iban": iban,
-            "name": account.get("name"),
-            "currency": account.get("currency"),
+            "name": account.get(
+                "name"
+            ),
+            "currency": account.get(
+                "currency"
+            ),
             "last_balance": None,
             "balance_type": None,
         }
@@ -490,14 +755,15 @@ def perform_sync():
 
         try:
 
-            balance_response = get_account_balance(
-                session,
-                uid
+            balance_response = (
+                get_account_balance(uid)
             )
 
-            balances = balance_response.get(
-                "balances",
-                []
+            balances = (
+                balance_response.get(
+                    "balances",
+                    []
+                )
             )
 
             if balances:
@@ -505,21 +771,31 @@ def perform_sync():
                 balance = balances[0]
 
                 amount = balance.get(
-                    "balanceAmount",
+                    "balance_amount",
                     {}
                 )
 
-                account_data["last_balance"] = (
-                    amount.get("amount")
+                account_data[
+                    "last_balance"
+                ] = amount.get(
+                    "amount"
                 )
 
-                account_data["currency"] = (
-                    amount.get("currency")
-                    or account_data["currency"]
+                account_data[
+                    "currency"
+                ] = (
+                    amount.get(
+                        "currency"
+                    )
+                    or account_data[
+                        "currency"
+                    ]
                 )
 
-                account_data["balance_type"] = (
-                    balance.get("balanceType")
+                account_data[
+                    "balance_type"
+                ] = balance.get(
+                    "balance_type"
                 )
 
         except Exception as exc:
@@ -531,10 +807,12 @@ def perform_sync():
             )
 
         # ----------------------------------------------------
-        # Gem/opdater konto
+        # Gem konto
         # ----------------------------------------------------
 
-        if save_account(account_data):
+        if save_account(
+            account_data
+        ):
             saved_accounts += 1
 
         # ----------------------------------------------------
@@ -545,23 +823,16 @@ def perform_sync():
 
             transactions_response = (
                 get_account_transactions(
-                    session,
                     uid
                 )
             )
 
-            if isinstance(
-                transactions_response,
-                dict
-            ):
-                transactions = (
-                    transactions_response.get(
-                        "transactions",
-                        []
-                    )
+            transactions = (
+                transactions_response.get(
+                    "transactions",
+                    []
                 )
-            else:
-                transactions = transactions_response
+            )
 
             logger.info(
                 "Konto %s: %s transaktioner modtaget",
@@ -572,26 +843,80 @@ def perform_sync():
             for tx in transactions:
 
                 transaction_id = (
-                    tx.get("transactionId")
-                    or tx.get("transaction_id")
-                    or tx.get("entryReference")
+                    tx.get(
+                        "transaction_id"
+                    )
+                    or tx.get(
+                        "entry_reference"
+                    )
                 )
 
                 if not transaction_id:
                     continue
 
                 booking_date = tx.get(
-                    "bookingDate"
+                    "booking_date"
                 )
 
                 value_date = tx.get(
-                    "valueDate"
+                    "value_date"
                 )
 
                 amount_data = tx.get(
-                    "transactionAmount",
+                    "transaction_amount",
                     {}
                 )
+
+                # ------------------------------------------------
+                # Enable Banking bruger creditor/debtor som objekter
+                # ------------------------------------------------
+
+                creditor = tx.get(
+                    "creditor"
+                )
+
+                debtor = tx.get(
+                    "debtor"
+                )
+
+                if isinstance(
+                    creditor,
+                    dict
+                ):
+                    creditor = creditor.get(
+                        "name"
+                    )
+
+                if isinstance(
+                    debtor,
+                    dict
+                ):
+                    debtor = debtor.get(
+                        "name"
+                    )
+
+                # ------------------------------------------------
+                # Remittance information
+                # ------------------------------------------------
+
+                remittance = tx.get(
+                    "remittance_information"
+                )
+
+                if isinstance(
+                    remittance,
+                    list
+                ):
+                    description = " ".join(
+                        str(x)
+                        for x in remittance
+                        if x
+                    )
+                else:
+                    description = (
+                        remittance
+                        or tx.get("note")
+                    )
 
                 transaction_data = {
                     "account_uid": uid,
@@ -604,20 +929,9 @@ def perform_sync():
                     "currency": amount_data.get(
                         "currency"
                     ),
-                    "creditor": tx.get(
-                        "creditorName"
-                    ),
-                    "debtor": tx.get(
-                        "debtorName"
-                    ),
-                    "description": (
-                        tx.get(
-                            "remittanceInformationUnstructured"
-                        )
-                        or tx.get(
-                            "additionalInformation"
-                        )
-                    ),
+                    "creditor": creditor,
+                    "debtor": debtor,
+                    "description": description,
                     "category": None,
                     "raw_data": tx,
                 }
@@ -631,13 +945,16 @@ def perform_sync():
         except Exception as exc:
 
             logger.warning(
-                "Kunne ikke hente transaktioner for %s: %s",
-                uid,
+                "Kunne ikke hente transaktioner "
+                "for %s: %s",
+                iban,
                 exc
             )
 
     logger.info(
-        "Sync færdig: %s konti, %s transaktioner, %s sprunget over",
+        "Sync færdig: %s konti, "
+        "%s transaktioner, "
+        "%s sprunget over",
         saved_accounts,
         saved_transactions,
         skipped_accounts
@@ -654,7 +971,9 @@ def perform_sync():
 # AUTH MIDDLEWARE
 # ============================================================
 
-class AuthMiddleware(BaseHTTPMiddleware):
+class AuthMiddleware(
+    BaseHTTPMiddleware
+):
 
     async def dispatch(
         self,
@@ -672,6 +991,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/login",
             "/logout",
             "/callback",
+            "/start",
             "/auto-sync",
         ]:
 
@@ -685,6 +1005,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     not CRON_SECRET
                     or token != CRON_SECRET
                 ):
+
                     return JSONResponse(
                         {
                             "success": False,
@@ -693,7 +1014,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         status_code=401,
                     )
 
-            return await call_next(request)
+            return await call_next(
+                request
+            )
 
         # ----------------------------------------------------
         # Normal bruger-login
@@ -708,7 +1031,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 status_code=303
             )
 
-        return await call_next(request)
+        return await call_next(
+            request
+        )
 
 
 app.add_middleware(
@@ -733,14 +1058,19 @@ async def login_page():
         <meta charset="utf-8">
         <title>Økonomi login</title>
     </head>
+
     <body>
+
         <h1>Økonomi</h1>
 
         <form method="post" action="/login">
+
             <button type="submit">
                 Log ind
             </button>
+
         </form>
+
     </body>
     </html>
     """
@@ -797,6 +1127,7 @@ async def home():
         <meta charset="utf-8">
         <title>Økonomi</title>
     </head>
+
     <body>
 
         <h1>Økonomi</h1>
@@ -837,7 +1168,7 @@ async def home():
 
 
 # ============================================================
-# ENABLE BANKING AUTH
+# ENABLE BANKING AUTHORIZATION
 # ============================================================
 
 @app.get("/start")
@@ -845,25 +1176,79 @@ async def start_bank_connection():
 
     global pending_state
 
-    pending_state = os.urandom(
-        16
-    ).hex()
+    pending_state = str(
+        uuid.uuid4()
+    )
 
-    params = {
+    redirect_url = (
+        f"{APP_URL}/callback"
+    )
+
+    valid_until = (
+        datetime.now(
+            timezone.utc
+        )
+        + timedelta(days=180)
+    ).isoformat()
+
+    body = {
+        "access": {
+            "valid_until": valid_until
+        },
+        "aspsp": {
+            "name": ENABLE_BANKING_BANK_NAME,
+            "country": ENABLE_BANKING_BANK_COUNTRY,
+        },
         "state": pending_state,
-        "redirect_uri": f"{APP_URL}/callback",
+        "redirect_url": redirect_url,
+        "psu_type": ENABLE_BANKING_PSU_TYPE,
     }
 
-    authorization_url = (
-        f"{ENABLE_BANKING_API_URL}/authorize?"
-        + urlencode(params)
+    logger.info(
+        "Starter Enable Banking authorization "
+        "for %s (%s)",
+        ENABLE_BANKING_BANK_NAME,
+        ENABLE_BANKING_BANK_COUNTRY
     )
+
+    response = requests.post(
+        f"{ENABLE_BANKING_API_URL}/auth",
+        headers=enable_headers(),
+        json=body,
+        timeout=60,
+    )
+
+    if not response.ok:
+        logger.error(
+            "Enable Banking /auth fejlede: "
+            "%s %s",
+            response.status_code,
+            response.text,
+        )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    authorization_url = data.get(
+        "url"
+    )
+
+    if not authorization_url:
+        raise Exception(
+            "Enable Banking returnerede "
+            "ingen authorization URL"
+        )
 
     return RedirectResponse(
         authorization_url,
         status_code=303
     )
 
+
+# ============================================================
+# CALLBACK
+# ============================================================
 
 @app.get("/callback")
 async def callback(
@@ -881,72 +1266,131 @@ async def callback(
         "state"
     )
 
+    error = request.query_params.get(
+        "error"
+    )
+
+    error_description = (
+        request.query_params.get(
+            "error_description"
+        )
+    )
+
+    # --------------------------------------------------------
+    # Banken afviste/cancelled
+    # --------------------------------------------------------
+
+    if error:
+
+        logger.error(
+            "Enable Banking authorization fejlede: "
+            "%s - %s",
+            error,
+            error_description
+        )
+
+        return HTMLResponse(
+            f"""
+            <h1>Bank-login fejlede</h1>
+            <p>{error}</p>
+            <p>{error_description or ""}</p>
+            <p>
+                <a href="/start">
+                    Prøv igen
+                </a>
+            </p>
+            """,
+            status_code=400,
+        )
+
+    # --------------------------------------------------------
+    # Manglende code
+    # --------------------------------------------------------
+
     if not code:
 
         return HTMLResponse(
-            "<h1>Fejl</h1>"
-            "<p>Ingen code modtaget.</p>",
+            """
+            <h1>Fejl</h1>
+            <p>Ingen authorization code modtaget.</p>
+            <p>
+                <a href="/start">
+                    Prøv igen
+                </a>
+            </p>
+            """,
             status_code=400,
         )
+
+    # --------------------------------------------------------
+    # Kontroller state
+    # --------------------------------------------------------
 
     if (
         pending_state
         and state != pending_state
     ):
 
+        logger.error(
+            "Ugyldig Enable Banking state"
+        )
+
         return HTMLResponse(
-            "<h1>Fejl</h1>"
-            "<p>Ugyldig state.</p>",
+            """
+            <h1>Fejl</h1>
+            <p>Ugyldig state.</p>
+            """,
             status_code=400,
         )
 
     # --------------------------------------------------------
-    # Hent private key
-    # --------------------------------------------------------
-
-    with open(
-        ENABLE_BANKING_PRIVATE_KEY,
-        "r",
-        encoding="utf-8",
-    ) as f:
-
-        private_key = f.read()
-
-    # --------------------------------------------------------
-    # Opret session
+    # Opret Enable Banking session
     # --------------------------------------------------------
 
     response = requests.post(
         f"{ENABLE_BANKING_API_URL}/sessions",
-        headers={
-            "Authorization": (
-                f"Bearer {ENABLE_BANKING_APP_ID}"
-            ),
-            "Content-Type": "application/json",
-        },
+        headers=enable_headers(),
         json={
-            "code": code,
-            "state": state,
-            "redirect_uri": (
-                f"{APP_URL}/callback"
-            ),
-            "private_key": private_key,
+            "code": code
         },
         timeout=60,
     )
+
+    if not response.ok:
+        logger.error(
+            "Enable Banking /sessions fejlede: "
+            "%s %s",
+            response.status_code,
+            response.text,
+        )
 
     response.raise_for_status()
 
     session_data = response.json()
 
+    if not session_data.get(
+        "session_id"
+    ):
+        raise Exception(
+            "Enable Banking returnerede "
+            "ingen session_id"
+        )
+
     current_session = session_data
 
     # --------------------------------------------------------
-    # Gem session permanent
+    # Gem session permanent i Supabase
     # --------------------------------------------------------
 
     save_bank_session(
         session_data
+    )
+
+    pending_state = None
+
+    logger.info(
+        "Ny Enable Banking session oprettet "
+        "og gemt permanent"
     )
 
     return RedirectResponse(
@@ -1089,6 +1533,7 @@ async def dashboard():
         <title>Økonomi Dashboard</title>
 
         <style>
+
             body {{
                 font-family: Arial, sans-serif;
                 margin: 40px;
@@ -1099,7 +1544,8 @@ async def dashboard():
                 width: 100%;
             }}
 
-            th, td {{
+            th,
+            td {{
                 border: 1px solid #ccc;
                 padding: 8px;
                 text-align: left;
@@ -1108,12 +1554,19 @@ async def dashboard():
             th {{
                 background: #eee;
             }}
+
         </style>
     </head>
 
     <body>
 
         <h1>Økonomi Dashboard</h1>
+
+        <p>
+            <a href="/start">
+                Login / forbind bank igen
+            </a>
+        </p>
 
         <p>
             <a href="/sync">
@@ -1124,19 +1577,29 @@ async def dashboard():
         <table>
 
             <thead>
+
                 <tr>
                     <th>Navn</th>
                     <th>IBAN</th>
                     <th>Valuta</th>
                     <th>Saldo</th>
                 </tr>
+
             </thead>
 
             <tbody>
+
                 {rows}
+
             </tbody>
 
         </table>
+
+        <p>
+            <a href="/transactions">
+                Transaktioner
+            </a>
+        </p>
 
         <p>
             <a href="/">
@@ -1200,11 +1663,13 @@ async def transactions():
     return f"""
     <!DOCTYPE html>
     <html>
+
     <head>
         <meta charset="utf-8">
         <title>Transaktioner</title>
 
         <style>
+
             body {{
                 font-family: Arial, sans-serif;
                 margin: 40px;
@@ -1215,7 +1680,8 @@ async def transactions():
                 width: 100%;
             }}
 
-            th, td {{
+            th,
+            td {{
                 border: 1px solid #ccc;
                 padding: 8px;
                 text-align: left;
@@ -1224,6 +1690,7 @@ async def transactions():
             th {{
                 background: #eee;
             }}
+
         </style>
     </head>
 
@@ -1234,16 +1701,20 @@ async def transactions():
         <table>
 
             <thead>
+
                 <tr>
                     <th>Dato</th>
                     <th>Beløb</th>
                     <th>Valuta</th>
                     <th>Beskrivelse</th>
                 </tr>
+
             </thead>
 
             <tbody>
+
                 {rows}
+
             </tbody>
 
         </table>

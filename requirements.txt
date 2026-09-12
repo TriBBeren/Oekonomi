@@ -1,5 +1,4 @@
 fastapi
 uvicorn
-PyJWT
-requests
-cryptography
+pydantic
+psycopg2-binary

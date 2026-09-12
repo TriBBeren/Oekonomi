@@ -3,11 +3,17 @@ from contextlib import asynccontextmanager
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-import psycopg2
-from psycopg2.extras import RealDictCursor
+
+# Prøver at importere psycopg2-binary / psycopg2 sikkert
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except ImportError:
+    raise RuntimeError(
+        "Mangler psycopg2. Tilføj 'psycopg2-binary' til din requirements.txt file."
+    )
 
 # --- Database Konfiguration ---
-# Henter database-URL fra Renders miljøvariabler
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 
@@ -56,16 +62,13 @@ def init_db():
 # --- Lifespan Handler ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Kører ved opstart
     print("Starter applikation og tjekker database...")
     init_db()
     yield
-    # Kører ved lukning
     print("Stoppere applikation...")
 
 
 # --- Oprettelse af FastAPI App ---
-# Placeret i det globale scope, så Uvicorn kan indlæse den via app:app
 app = FastAPI(
     title="Transaction API",
     description="API til håndtering af transaktioner",

@@ -36,6 +36,8 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 APP_USERNAME = os.getenv("APP_USERNAME")
 APP_PASSWORD = os.getenv("APP_PASSWORD")
 
+CRON_SECRET = os.getenv("CRON_SECRET")
+
 
 # ============================================================
 # AUTHENTICATION CONFIGURATION
@@ -43,7 +45,6 @@ APP_PASSWORD = os.getenv("APP_PASSWORD")
 
 AUTH_COOKIE = "oekonomi_auth"
 
-# Login cookie is valid for 7 days
 AUTH_MAX_AGE = 7 * 24 * 60 * 60
 
 
@@ -54,11 +55,15 @@ AUTH_MAX_AGE = 7 * 24 * 60 * 60
 app = FastAPI()
 
 
-# Enable Banking session is kept in RAM.
-# It will be lost if Render restarts the service.
+# ============================================================
+# RUNTIME STATE
+# ============================================================
+
+# Session is cached in RAM for fast access.
+# The permanent copy is stored in Supabase.
 current_session = None
 
-# OAuth state used to protect the callback.
+# OAuth state used during Enable Banking login.
 pending_state = None
 
 
@@ -75,20 +80,19 @@ if not APP_PASSWORD:
 if not SUPABASE_SERVICE_KEY:
     print("WARNING: SUPABASE_SERVICE_KEY is not configured.")
 
+if not CRON_SECRET:
+    print("WARNING: CRON_SECRET is not configured.")
+
 
 # ============================================================
 # AUTHENTICATION
 # ============================================================
 
 def make_auth_token():
-    """
-    Create a signed authentication token.
 
-    Format:
-        timestamp.signature
-    """
-
-    timestamp = str(int(time.time()))
+    timestamp = str(
+        int(time.time())
+    )
 
     signature = hmac.new(
         APP_PASSWORD.encode("utf-8"),
@@ -100,9 +104,6 @@ def make_auth_token():
 
 
 def valid_auth_token(token):
-    """
-    Validate authentication cookie.
-    """
 
     if not token:
         return False
@@ -111,17 +112,21 @@ def valid_auth_token(token):
         return False
 
     try:
-        timestamp_text, signature = token.split(".", 1)
 
-        timestamp = int(timestamp_text)
+        timestamp_text, signature = token.split(
+            ".",
+            1
+        )
+
+        timestamp = int(
+            timestamp_text
+        )
 
         now = time.time()
 
-        # Token cannot be older than 7 days
         if now - timestamp > AUTH_MAX_AGE:
             return False
 
-        # Token cannot be from the future
         if timestamp > now + 60:
             return False
 
@@ -137,13 +142,35 @@ def valid_auth_token(token):
         )
 
     except Exception:
+
         return False
 
 
 def is_authenticated(request: Request):
-    token = request.cookies.get(AUTH_COOKIE)
+
+    token = request.cookies.get(
+        AUTH_COOKIE
+    )
 
     return valid_auth_token(token)
+
+
+# ============================================================
+# CRON AUTHENTICATION
+# ============================================================
+
+def valid_cron_token(token):
+
+    if not token:
+        return False
+
+    if not CRON_SECRET:
+        return False
+
+    return hmac.compare_digest(
+        str(token),
+        str(CRON_SECRET)
+    )
 
 
 # ============================================================
@@ -151,15 +178,38 @@ def is_authenticated(request: Request):
 # ============================================================
 
 @app.middleware("http")
-async def authentication_middleware(request: Request, call_next):
+async def authentication_middleware(
+    request: Request,
+    call_next
+):
 
     path = request.url.path
 
-    # These paths must be accessible without being logged in.
+    # Public paths.
     public_paths = {
         "/login",
         "/logout"
     }
+
+    # Automatic sync is authenticated separately
+    # using CRON_SECRET.
+    if path == "/auto-sync":
+
+        token = request.query_params.get(
+            "token"
+        )
+
+        if valid_cron_token(token):
+
+            return await call_next(request)
+
+        return JSONResponse(
+            {
+                "success": False,
+                "error": "Invalid cron token."
+            },
+            status_code=401
+        )
 
     if path not in public_paths:
 
@@ -177,8 +227,13 @@ async def authentication_middleware(request: Request, call_next):
 # LOGIN PAGE
 # ============================================================
 
-@app.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request):
+@app.get(
+    "/login",
+    response_class=HTMLResponse
+)
+async def login_page(
+    request: Request
+):
 
     if is_authenticated(request):
 
@@ -196,7 +251,8 @@ async def login_page(request: Request):
 <meta charset="UTF-8">
 
 <meta name="viewport"
-      content="width=device-width, initial-scale=1.0">
+      content="width=device-width,
+               initial-scale=1.0">
 
 <title>Økonomi - Login</title>
 
@@ -224,7 +280,9 @@ body {
 
     border-radius: 12px;
 
-    box-shadow: 0 4px 20px rgba(0,0,0,.12);
+    box-shadow:
+        0 4px 20px
+        rgba(0,0,0,.12);
 }
 
 h1 {
@@ -335,49 +393,57 @@ Forkert brugernavn eller adgangskode.
 
 </div>
 
-
 <script>
 
 document
 .getElementById("loginForm")
-.addEventListener("submit", async function(e) {
+.addEventListener(
+    "submit",
+    async function(e) {
 
-    e.preventDefault();
+        e.preventDefault();
 
-    const username =
-        document.getElementById("username").value;
+        const username =
+            document
+            .getElementById("username")
+            .value;
 
-    const password =
-        document.getElementById("password").value;
+        const password =
+            document
+            .getElementById("password")
+            .value;
 
-    const response = await fetch(
-        "/login",
-        {
-            method: "POST",
+        const response =
+            await fetch(
+                "/login",
+                {
+                    method: "POST",
 
-            headers: {
-                "Content-Type": "application/json"
-            },
+                    headers: {
+                        "Content-Type":
+                            "application/json"
+                    },
 
-            body: JSON.stringify({
-                username: username,
-                password: password
-            })
+                    body: JSON.stringify({
+                        username: username,
+                        password: password
+                    })
+                }
+            );
+
+        if (response.ok) {
+
+            window.location.href = "/";
+
+        } else {
+
+            document
+            .getElementById("error")
+            .style.display = "block";
         }
-    );
 
-    if (response.ok) {
-
-        window.location.href = "/";
-
-    } else {
-
-        document
-        .getElementById("error")
-        .style.display = "block";
     }
-
-});
+);
 
 </script>
 
@@ -392,7 +458,9 @@ document
 # ============================================================
 
 @app.post("/login")
-async def login(request: Request):
+async def login(
+    request: Request
+):
 
     try:
 
@@ -408,11 +476,17 @@ async def login(request: Request):
         )
 
     username = str(
-        data.get("username", "")
+        data.get(
+            "username",
+            ""
+        )
     )
 
     password = str(
-        data.get("password", "")
+        data.get(
+            "password",
+            ""
+        )
     )
 
     username_ok = hmac.compare_digest(
@@ -482,7 +556,6 @@ async def logout():
 
 def create_jwt():
 
-    # Read private key from Render Secret File
     with open(
         PRIVATE_KEY_FILE,
         "rb"
@@ -496,19 +569,19 @@ def create_jwt():
 
     payload = {
 
-        # Enable Banking expects this issuer
-        "iss": "enablebanking.com",
+        "iss":
+            "enablebanking.com",
 
-        "aud": "api.enablebanking.com",
+        "aud":
+            "api.enablebanking.com",
 
-        "iat": now,
+        "iat":
+            now,
 
-        "exp": now + 300
+        "exp":
+            now + 300
     }
 
-    # IMPORTANT:
-    # Enable Banking requires the application ID
-    # as the "kid" in the JWT header.
     token = jwt.encode(
 
         payload,
@@ -567,10 +640,139 @@ def supabase_url(table):
 
 
 # ============================================================
+# SAVE BANK SESSION
+# ============================================================
+
+def save_bank_session(
+    session_data
+):
+
+    session_id = session_data.get(
+        "session_id"
+    )
+
+    if not session_id:
+
+        raise ValueError(
+            "Enable Banking session "
+            "mangler session_id."
+        )
+
+    response = requests.post(
+
+        supabase_url(
+            "bank_sessions"
+        ),
+
+        headers={
+            **supabase_headers(),
+
+            "Prefer":
+                (
+                    "resolution="
+                    "merge-duplicates,"
+                    "return=minimal"
+                )
+        },
+
+        json={
+            "session_id":
+                session_id,
+
+            "session_data":
+                session_data,
+
+            "status":
+                "active",
+
+            "updated_at":
+                datetime.now(
+                    timezone.utc
+                ).isoformat()
+        },
+
+        timeout=60
+    )
+
+    response.raise_for_status()
+
+    print(
+        "Bank session saved to Supabase."
+    )
+
+
+# ============================================================
+# LOAD BANK SESSION
+# ============================================================
+
+def load_bank_session():
+
+    global current_session
+
+    response = requests.get(
+
+        supabase_url(
+            "bank_sessions"
+        ),
+
+        headers=supabase_headers(),
+
+        params={
+            "status":
+                "eq.active",
+
+            "order":
+                "updated_at.desc",
+
+            "limit":
+                "1"
+        },
+
+        timeout=60
+    )
+
+    response.raise_for_status()
+
+    rows = response.json()
+
+    if not rows:
+
+        print(
+            "No active bank session found "
+            "in Supabase."
+        )
+
+        return None
+
+    session_data = rows[0].get(
+        "session_data"
+    )
+
+    if not session_data:
+
+        print(
+            "Bank session row exists, "
+            "but session_data is empty."
+        )
+
+        return None
+
+    current_session = session_data
+
+    print(
+        "Bank session loaded from Supabase."
+    )
+
+    return current_session
+
+
+# ============================================================
 # SAVE ACCOUNTS
 # ============================================================
 
-def save_accounts(accounts):
+def save_accounts(
+    accounts
+):
 
     rows = []
 
@@ -592,11 +794,14 @@ def save_accounts(accounts):
         })
 
     if not rows:
+
         return
 
     response = requests.post(
 
-        supabase_url("accounts"),
+        supabase_url(
+            "accounts"
+        ),
 
         headers={
             **supabase_headers(),
@@ -623,16 +828,18 @@ def update_account_balance(
 ):
 
     balances = (
-        balance_data.get("balances")
+        balance_data.get(
+            "balances"
+        )
         or []
     )
 
     if not balances:
+
         return False
 
     selected = None
 
-    # Prefer closing_available
     for balance in balances:
 
         if balance.get(
@@ -643,7 +850,6 @@ def update_account_balance(
 
             break
 
-    # Otherwise interim_available
     if selected is None:
 
         for balance in balances:
@@ -656,7 +862,6 @@ def update_account_balance(
 
                 break
 
-    # Otherwise first balance
     if selected is None:
 
         selected = balances[0]
@@ -682,7 +887,9 @@ def update_account_balance(
 
     response = requests.patch(
 
-        supabase_url("accounts"),
+        supabase_url(
+            "accounts"
+        ),
 
         headers=supabase_headers(),
 
@@ -871,16 +1078,12 @@ def convert_transaction(
         )
     )
 
-    amount = (
-        amount_data.get(
-            "amount"
-        )
+    amount = amount_data.get(
+        "amount"
     )
 
-    currency = (
-        amount_data.get(
-            "currency"
-        )
+    currency = amount_data.get(
+        "currency"
     )
 
     if isinstance(
@@ -1030,6 +1233,180 @@ def save_transactions(
 
 
 # ============================================================
+# SYNCHRONIZE CURRENT SESSION
+# ============================================================
+
+def perform_sync():
+
+    global current_session
+
+    # First try RAM.
+    if not current_session:
+
+        # If not in RAM, load from Supabase.
+        load_bank_session()
+
+    if not current_session:
+
+        raise RuntimeError(
+            "Ingen aktiv bankforbindelse. "
+            "Log ind på banken via "
+            "/start først."
+        )
+
+    session_id = current_session.get(
+        "session_id"
+    )
+
+    if not session_id:
+
+        raise RuntimeError(
+            "Den gemte banksession "
+            "indeholder ikke session_id."
+        )
+
+    accounts = current_session.get(
+        "accounts",
+        []
+    )
+
+    if not accounts:
+
+        raise RuntimeError(
+            "Den gemte banksession "
+            "indeholder ingen konti."
+        )
+
+    # Make sure accounts are also
+    # present in Supabase.
+    save_accounts(
+        accounts
+    )
+
+    result = []
+
+    for account in accounts:
+
+        account_uid = account.get(
+            "uid"
+        )
+
+        account_result = {
+
+            "account_uid":
+                account_uid,
+
+            "balance_updated":
+                False,
+
+            "transactions_found":
+                0,
+
+            "transactions_saved":
+                0,
+
+            "error":
+                None
+        }
+
+        try:
+
+            # ------------------------------------------------
+            # BALANCE
+            # ------------------------------------------------
+
+            balance_response = requests.get(
+
+                f"{API_URL}/sessions/"
+                f"{session_id}/accounts/"
+                f"{account_uid}/balances",
+
+                headers=eb_headers(),
+
+                timeout=60
+            )
+
+            balance_response.raise_for_status()
+
+            balance_data = (
+                balance_response.json()
+            )
+
+            account_result[
+                "balance_updated"
+            ] = update_account_balance(
+
+                account_uid,
+
+                balance_data
+            )
+
+            # ------------------------------------------------
+            # TRANSACTIONS
+            # ------------------------------------------------
+
+            raw_transactions = (
+                fetch_all_transactions(
+
+                    session_id,
+
+                    account_uid
+                )
+            )
+
+            account_result[
+                "transactions_found"
+            ] = len(
+                raw_transactions
+            )
+
+            converted_transactions = []
+
+            for transaction in raw_transactions:
+
+                converted_transactions.append(
+
+                    convert_transaction(
+
+                        account_uid,
+
+                        transaction
+                    )
+                )
+
+            saved = save_transactions(
+
+                converted_transactions
+            )
+
+            account_result[
+                "transactions_saved"
+            ] = saved
+
+        except Exception as exc:
+
+            account_result[
+                "error"
+            ] = str(exc)
+
+        result.append(
+            account_result
+        )
+
+    return {
+
+        "success":
+            True,
+
+        "accounts":
+            len(accounts),
+
+        "result":
+            result
+    }
+
+
+# ============================================================
 # HOME
 # ============================================================
 
@@ -1150,7 +1527,6 @@ Log ud
 
 </div>
 
-
 <div class="card">
 
 <h2>System</h2>
@@ -1201,9 +1577,11 @@ async def start():
                     + timedelta(days=1)
                 ).isoformat(),
 
-            "balances": True,
+            "balances":
+                True,
 
-            "transactions": True
+            "transactions":
+                True
         },
 
         "aspsp": {
@@ -1436,12 +1814,53 @@ async def callback(
             status_code=500
         )
 
-    current_session = (
-        response.json()
-    )
+    current_session = response.json()
 
     # State can only be used once.
     pending_state = None
+
+    # --------------------------------------------------------
+    # Save session permanently in Supabase
+    # --------------------------------------------------------
+
+    try:
+
+        save_bank_session(
+            current_session
+        )
+
+    except Exception as exc:
+
+        print(
+            f"ERROR saving bank session: {exc}"
+        )
+
+        return HTMLResponse(
+
+            f"""
+            <h1>
+            Bankforbindelse oprettet
+            </h1>
+
+            <p>
+            Banken er forbundet,
+            men banksessionen kunne
+            ikke gemmes i Supabase.
+            </p>
+
+            <pre>
+            {escape(str(exc))}
+            </pre>
+
+            <p>
+            <a href="/">
+            Tilbage
+            </a>
+            </p>
+            """,
+
+            status_code=500
+        )
 
     # --------------------------------------------------------
     # Save accounts in Supabase
@@ -1505,6 +1924,10 @@ async def callback(
 async def dashboard():
 
     global current_session
+
+    if not current_session:
+
+        load_bank_session()
 
     if not current_session:
 
@@ -1639,7 +2062,6 @@ Log ud
 
 </div>
 
-
 <div class="card">
 
 <table>
@@ -1719,6 +2141,10 @@ Log ud
 async def transactions():
 
     global current_session
+
+    if not current_session:
+
+        load_bank_session()
 
     if not current_session:
 
@@ -1834,43 +2260,19 @@ async def transactions():
 
 
 # ============================================================
-# SYNCHRONIZE BANK -> SUPABASE
+# MANUAL SYNCHRONIZATION
 # ============================================================
 
 @app.get("/sync")
 async def sync():
 
-    global current_session
+    try:
 
-    if not current_session:
+        result = perform_sync()
 
-        return JSONResponse(
+        return result
 
-            {
-
-                "success":
-                    False,
-
-                "error":
-                    (
-                        "No active "
-                        "Enable Banking "
-                        "session. "
-                        "Go to /start "
-                        "first."
-                    )
-            },
-
-            status_code=400
-        )
-
-    session_id = (
-        current_session.get(
-            "session_id"
-        )
-    )
-
-    if not session_id:
+    except Exception as exc:
 
         return JSONResponse(
 
@@ -1880,130 +2282,68 @@ async def sync():
                     False,
 
                 "error":
-                    "No session_id."
+                    str(exc)
             },
 
-            status_code=400
+            status_code=500
         )
 
-    accounts = (
-        current_session.get(
-            "accounts",
-            []
-        )
+
+# ============================================================
+# AUTOMATIC SYNCHRONIZATION
+# ============================================================
+
+@app.get("/auto-sync")
+async def auto_sync():
+
+    print(
+        "Automatic bank synchronization started."
     )
 
-    result = []
+    try:
 
-    for account in accounts:
+        result = perform_sync()
 
-        account_uid = (
-            account.get(
-                "uid"
-            )
+        print(
+            "Automatic bank synchronization "
+            "completed successfully."
         )
 
-        account_result = {
+        return JSONResponse(
 
-            "account_uid":
-                account_uid,
+            {
 
-            "balance_updated":
-                False,
+                "success":
+                    True,
 
-            "transactions_saved":
-                0,
+                "mode":
+                    "automatic",
 
-            "error":
-                None
-        }
-
-        try:
-
-            # ------------------------------------------------
-            # BALANCE
-            # ------------------------------------------------
-
-            balance_response = requests.get(
-
-                f"{API_URL}/sessions/"
-                f"{session_id}/accounts/"
-                f"{account_uid}/balances",
-
-                headers=eb_headers(),
-
-                timeout=60
-            )
-
-            balance_response.raise_for_status()
-
-            balance_data = (
-                balance_response.json()
-            )
-
-            account_result[
-                "balance_updated"
-            ] = update_account_balance(
-
-                account_uid,
-
-                balance_data
-            )
-
-            # ------------------------------------------------
-            # TRANSACTIONS
-            # ------------------------------------------------
-
-            raw_transactions = (
-                fetch_all_transactions(
-
-                    session_id,
-
-                    account_uid
-                )
-            )
-
-            converted_transactions = []
-
-            for transaction in raw_transactions:
-
-                converted_transactions.append(
-
-                    convert_transaction(
-
-                        account_uid,
-
-                        transaction
-                    )
-                )
-
-            saved = save_transactions(
-
-                converted_transactions
-            )
-
-            account_result[
-                "transactions_saved"
-            ] = saved
-
-        except Exception as exc:
-
-            account_result[
-                "error"
-            ] = str(exc)
-
-        result.append(
-            account_result
+                "result":
+                    result
+            }
         )
 
-    return {
+    except Exception as exc:
 
-        "success":
-            True,
+        print(
+            "Automatic bank synchronization "
+            f"failed: {exc}"
+        )
 
-        "accounts":
-            len(accounts),
+        return JSONResponse(
 
-        "result":
-            result
-    }
+            {
+
+                "success":
+                    False,
+
+                "mode":
+                    "automatic",
+
+                "error":
+                    str(exc)
+            },
+
+            status_code=500
+        )

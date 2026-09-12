@@ -1,10 +1,9 @@
 import os
 import json
-import base64
 import logging
-import subprocess
 import uuid
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
+from urllib.parse import urlencode
 
 import requests
 from fastapi import FastAPI, Request
@@ -24,8 +23,15 @@ logger = logging.getLogger("oekonomi")
 # ENVIRONMENT
 # ============================================================
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+SUPABASE_URL = os.getenv(
+    "SUPABASE_URL",
+    ""
+).rstrip("/")
+
+SUPABASE_SERVICE_KEY = os.getenv(
+    "SUPABASE_SERVICE_KEY",
+    ""
+)
 
 ENABLE_BANKING_API_URL = os.getenv(
     "ENABLE_BANKING_API_URL",
@@ -40,21 +46,6 @@ ENABLE_BANKING_APP_ID = os.getenv(
 ENABLE_BANKING_PRIVATE_KEY = os.getenv(
     "ENABLE_BANKING_PRIVATE_KEY",
     "/etc/secrets/enable_banking_private_key.pem"
-)
-
-ENABLE_BANKING_BANK_NAME = os.getenv(
-    "ENABLE_BANKING_BANK_NAME",
-    "Danske Andelskassers Bank"
-)
-
-ENABLE_BANKING_BANK_COUNTRY = os.getenv(
-    "ENABLE_BANKING_BANK_COUNTRY",
-    "DK"
-)
-
-ENABLE_BANKING_PSU_TYPE = os.getenv(
-    "ENABLE_BANKING_PSU_TYPE",
-    "personal"
 )
 
 CRON_SECRET = os.getenv(
@@ -107,136 +98,6 @@ def supabase_url(table):
 
 
 # ============================================================
-# ENABLE BANKING JWT
-# ============================================================
-
-def base64url_encode(data):
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
-
-
-def create_enable_banking_jwt():
-    """
-    Opretter en Enable Banking JWT.
-
-    Enable Banking kræver:
-      iss = enablebanking.com
-      aud = api.enablebanking.com
-      iat = nu
-      exp = maks 24 timer frem
-
-    JWT signeres med appens private RSA-nøgle
-    ved hjælp af RS256.
-    """
-
-    if not ENABLE_BANKING_APP_ID:
-        raise Exception(
-            "ENABLE_BANKING_APP_ID mangler"
-        )
-
-    if not os.path.exists(
-        ENABLE_BANKING_PRIVATE_KEY
-    ):
-        raise Exception(
-            "Enable Banking private key findes ikke: "
-            f"{ENABLE_BANKING_PRIVATE_KEY}"
-        )
-
-    now = int(
-        datetime.now(timezone.utc).timestamp()
-    )
-
-    # 1 time.
-    # Det ligger sikkert under Enable Bankings
-    # maksimale TTL på 24 timer.
-    exp = now + 3600
-
-    header = {
-        "typ": "JWT",
-        "alg": "RS256",
-        "kid": ENABLE_BANKING_APP_ID,
-    }
-
-    payload = {
-        "iss": "enablebanking.com",
-        "aud": "api.enablebanking.com",
-        "iat": now,
-        "exp": exp,
-    }
-
-    header_encoded = base64url_encode(
-        json.dumps(
-            header,
-            separators=(",", ":")
-        ).encode("utf-8")
-    )
-
-    payload_encoded = base64url_encode(
-        json.dumps(
-            payload,
-            separators=(",", ":")
-        ).encode("utf-8")
-    )
-
-    signing_input = (
-        f"{header_encoded}.{payload_encoded}"
-    ).encode("ascii")
-
-    try:
-        result = subprocess.run(
-            [
-                "openssl",
-                "dgst",
-                "-sha256",
-                "-sign",
-                ENABLE_BANKING_PRIVATE_KEY,
-            ],
-            input=signing_input,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=True,
-            timeout=30,
-        )
-    except subprocess.CalledProcessError as exc:
-        error_text = (
-            exc.stderr.decode(
-                "utf-8",
-                errors="replace"
-            )
-        )
-
-        raise Exception(
-            "Kunne ikke signere Enable Banking JWT: "
-            + error_text
-        )
-
-    signature_encoded = base64url_encode(
-        result.stdout
-    )
-
-    token = (
-        f"{header_encoded}."
-        f"{payload_encoded}."
-        f"{signature_encoded}"
-    )
-
-    return token
-
-
-def enable_headers():
-    """
-    Headers til alle Enable Banking API-kald.
-    """
-
-    jwt = create_enable_banking_jwt()
-
-    return {
-        "Authorization": f"Bearer {jwt}",
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    }
-
-
-# ============================================================
 # BANK SESSION
 # ============================================================
 
@@ -245,9 +106,7 @@ def save_bank_session(session_data):
     if not session_data:
         return
 
-    session_id = session_data.get(
-        "session_id"
-    )
+    session_id = session_data.get("session_id")
 
     if not session_id:
         logger.warning(
@@ -259,11 +118,9 @@ def save_bank_session(session_data):
         "session_id": session_id,
         "session_data": session_data,
         "status": "active",
-        "updated_at": (
-            datetime.now(
-                timezone.utc
-            ).isoformat()
-        ),
+        "updated_at": datetime.now(
+            timezone.utc
+        ).isoformat(),
     }
 
     response = requests.post(
@@ -364,12 +221,13 @@ def save_account(account):
         "balance_type": account.get(
             "balance_type"
         ),
-        "updated_at": (
-            datetime.now(
-                timezone.utc
-            ).isoformat()
-        ),
+        "updated_at": datetime.now(
+            timezone.utc
+        ).isoformat(),
     }
+
+    # Find eksisterende konto først.
+    # Dette undgår den tidligere Supabase 409-fejl.
 
     lookup = requests.get(
         supabase_url("accounts"),
@@ -382,9 +240,19 @@ def save_account(account):
         timeout=30,
     )
 
+    if not lookup.ok:
+        logger.error(
+            "Fejl ved opslag af konto %s: %s %s",
+            uid,
+            lookup.status_code,
+            lookup.text,
+        )
+
     lookup.raise_for_status()
 
     existing = lookup.json()
+
+    # Eksisterende konto
 
     if existing:
 
@@ -415,6 +283,8 @@ def save_account(account):
         )
 
         return True
+
+    # Ny konto
 
     response = requests.post(
         supabase_url("accounts"),
@@ -496,11 +366,9 @@ def save_transaction(transaction):
         "raw_data": transaction.get(
             "raw_data"
         ),
-        "created_at": (
-            datetime.now(
-                timezone.utc
-            ).isoformat()
-        ),
+        "created_at": datetime.now(
+            timezone.utc
+        ).isoformat(),
     }
 
     response = requests.post(
@@ -539,43 +407,32 @@ def save_transaction(transaction):
 # ENABLE BANKING API
 # ============================================================
 
-def get_session_accounts(session):
+def get_accounts(session):
 
-    accounts = session.get(
-        "accounts",
-        []
+    session_id = session.get(
+        "session_id"
     )
 
-    if not isinstance(
-        accounts,
-        list
-    ):
+    if not session_id:
         raise Exception(
-            "Enable Banking session indeholder "
-            "ikke en gyldig accounts-liste"
+            "Session mangler session_id"
         )
 
-    return accounts
-
-
-def get_account_details(
-    account_uid
-):
-
     response = requests.get(
-        (
-            f"{ENABLE_BANKING_API_URL}"
-            f"/accounts/{account_uid}/details"
-        ),
-        headers=enable_headers(),
+        f"{ENABLE_BANKING_API_URL}/accounts",
+        headers={
+            "Authorization": (
+                f"Bearer {session_id}"
+            ),
+            "Accept": "application/json",
+        },
         timeout=60,
     )
 
     if not response.ok:
         logger.error(
-            "Enable Banking details-fejl for %s: "
+            "Enable Banking accounts-fejl: "
             "%s %s",
-            account_uid,
             response.status_code,
             response.text,
         )
@@ -586,15 +443,30 @@ def get_account_details(
 
 
 def get_account_balance(
+    session,
     account_uid
 ):
+
+    session_id = session.get(
+        "session_id"
+    )
+
+    if not session_id:
+        raise Exception(
+            "Session mangler session_id"
+        )
 
     response = requests.get(
         (
             f"{ENABLE_BANKING_API_URL}"
             f"/accounts/{account_uid}/balances"
         ),
-        headers=enable_headers(),
+        headers={
+            "Authorization": (
+                f"Bearer {session_id}"
+            ),
+            "Accept": "application/json",
+        },
         timeout=60,
     )
 
@@ -613,15 +485,30 @@ def get_account_balance(
 
 
 def get_account_transactions(
+    session,
     account_uid
 ):
+
+    session_id = session.get(
+        "session_id"
+    )
+
+    if not session_id:
+        raise Exception(
+            "Session mangler session_id"
+        )
 
     response = requests.get(
         (
             f"{ENABLE_BANKING_API_URL}"
             f"/accounts/{account_uid}/transactions"
         ),
-        headers=enable_headers(),
+        headers={
+            "Authorization": (
+                f"Bearer {session_id}"
+            ),
+            "Accept": "application/json",
+        },
         timeout=60,
     )
 
@@ -669,16 +556,32 @@ def perform_sync():
 
     current_session = session
 
-    # --------------------------------------------------------
-    # Konti kommer fra den autoriserede session
-    # --------------------------------------------------------
-
-    accounts = get_session_accounts(
+    accounts_response = get_accounts(
         session
     )
 
+    if isinstance(
+        accounts_response,
+        dict
+    ):
+        accounts = accounts_response.get(
+            "accounts",
+            []
+        )
+    else:
+        accounts = accounts_response
+
+    if not isinstance(
+        accounts,
+        list
+    ):
+        raise Exception(
+            "Enable Banking returnerede "
+            "ikke en gyldig accounts-liste"
+        )
+
     logger.info(
-        "Enable Banking session indeholder %s konti",
+        "Enable Banking returnerede %s konti",
         len(accounts)
     )
 
@@ -686,13 +589,11 @@ def perform_sync():
     skipped_accounts = 0
     saved_transactions = 0
 
-    # --------------------------------------------------------
-    # Behandl konti
-    # --------------------------------------------------------
-
     for account in accounts:
 
-        uid = account.get("uid")
+        uid = account.get(
+            "uid"
+        )
 
         if not uid:
             logger.warning(
@@ -701,10 +602,6 @@ def perform_sync():
 
             skipped_accounts += 1
             continue
-
-        # ----------------------------------------------------
-        # IBAN
-        # ----------------------------------------------------
 
         account_id = account.get(
             "account_id",
@@ -723,6 +620,12 @@ def perform_sync():
                 "iban"
             )
 
+        if not iban and isinstance(
+            account_id,
+            str
+        ):
+            iban = account_id
+
         if not iban:
             logger.info(
                 "Konto uden IBAN springes over: %s",
@@ -731,10 +634,6 @@ def perform_sync():
 
             skipped_accounts += 1
             continue
-
-        # ----------------------------------------------------
-        # Grundlæggende kontooplysninger
-        # ----------------------------------------------------
 
         account_data = {
             "uid": uid,
@@ -749,14 +648,13 @@ def perform_sync():
             "balance_type": None,
         }
 
-        # ----------------------------------------------------
-        # Hent saldo
-        # ----------------------------------------------------
-
         try:
 
             balance_response = (
-                get_account_balance(uid)
+                get_account_balance(
+                    session,
+                    uid
+                )
             )
 
             balances = (
@@ -806,23 +704,16 @@ def perform_sync():
                 exc
             )
 
-        # ----------------------------------------------------
-        # Gem konto
-        # ----------------------------------------------------
-
         if save_account(
             account_data
         ):
             saved_accounts += 1
 
-        # ----------------------------------------------------
-        # Hent transaktioner
-        # ----------------------------------------------------
-
         try:
 
             transactions_response = (
                 get_account_transactions(
+                    session,
                     uid
                 )
             )
@@ -854,22 +745,10 @@ def perform_sync():
                 if not transaction_id:
                     continue
 
-                booking_date = tx.get(
-                    "booking_date"
-                )
-
-                value_date = tx.get(
-                    "value_date"
-                )
-
                 amount_data = tx.get(
                     "transaction_amount",
                     {}
                 )
-
-                # ------------------------------------------------
-                # Enable Banking bruger creditor/debtor som objekter
-                # ------------------------------------------------
 
                 creditor = tx.get(
                     "creditor"
@@ -895,10 +774,6 @@ def perform_sync():
                         "name"
                     )
 
-                # ------------------------------------------------
-                # Remittance information
-                # ------------------------------------------------
-
                 remittance = tx.get(
                     "remittance_information"
                 )
@@ -921,8 +796,12 @@ def perform_sync():
                 transaction_data = {
                     "account_uid": uid,
                     "transaction_id": transaction_id,
-                    "booking_date": booking_date,
-                    "value_date": value_date,
+                    "booking_date": tx.get(
+                        "booking_date"
+                    ),
+                    "value_date": tx.get(
+                        "value_date"
+                    ),
                     "amount": amount_data.get(
                         "amount"
                     ),
@@ -983,10 +862,6 @@ class AuthMiddleware(
 
         path = request.url.path
 
-        # ----------------------------------------------------
-        # Offentlige routes
-        # ----------------------------------------------------
-
         if path in [
             "/login",
             "/logout",
@@ -1017,10 +892,6 @@ class AuthMiddleware(
             return await call_next(
                 request
             )
-
-        # ----------------------------------------------------
-        # Normal bruger-login
-        # ----------------------------------------------------
 
         if request.cookies.get(
             AUTH_COOKIE
@@ -1180,65 +1051,24 @@ async def start_bank_connection():
         uuid.uuid4()
     )
 
-    redirect_url = (
+    redirect_uri = (
         f"{APP_URL}/callback"
     )
 
-    valid_until = (
-        datetime.now(
-            timezone.utc
-        )
-        + timedelta(days=180)
-    ).isoformat()
-
-    body = {
-        "access": {
-            "valid_until": valid_until
-        },
-        "aspsp": {
-            "name": ENABLE_BANKING_BANK_NAME,
-            "country": ENABLE_BANKING_BANK_COUNTRY,
-        },
+    params = {
         "state": pending_state,
-        "redirect_url": redirect_url,
-        "psu_type": ENABLE_BANKING_PSU_TYPE,
+        "redirect_uri": redirect_uri,
     }
 
     logger.info(
         "Starter Enable Banking authorization "
-        "for %s (%s)",
-        ENABLE_BANKING_BANK_NAME,
-        ENABLE_BANKING_BANK_COUNTRY
+        "for Danske Andelskassers Bank (DK)"
     )
 
-    response = requests.post(
-        f"{ENABLE_BANKING_API_URL}/auth",
-        headers=enable_headers(),
-        json=body,
-        timeout=60,
+    authorization_url = (
+        f"{ENABLE_BANKING_API_URL}/authorize?"
+        + urlencode(params)
     )
-
-    if not response.ok:
-        logger.error(
-            "Enable Banking /auth fejlede: "
-            "%s %s",
-            response.status_code,
-            response.text,
-        )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    authorization_url = data.get(
-        "url"
-    )
-
-    if not authorization_url:
-        raise Exception(
-            "Enable Banking returnerede "
-            "ingen authorization URL"
-        )
 
     return RedirectResponse(
         authorization_url,
@@ -1276,10 +1106,6 @@ async def callback(
         )
     )
 
-    # --------------------------------------------------------
-    # Banken afviste/cancelled
-    # --------------------------------------------------------
-
     if error:
 
         logger.error(
@@ -1303,10 +1129,6 @@ async def callback(
             status_code=400,
         )
 
-    # --------------------------------------------------------
-    # Manglende code
-    # --------------------------------------------------------
-
     if not code:
 
         return HTMLResponse(
@@ -1321,10 +1143,6 @@ async def callback(
             """,
             status_code=400,
         )
-
-    # --------------------------------------------------------
-    # Kontroller state
-    # --------------------------------------------------------
 
     if (
         pending_state
@@ -1347,11 +1165,41 @@ async def callback(
     # Opret Enable Banking session
     # --------------------------------------------------------
 
+    if not ENABLE_BANKING_APP_ID:
+        raise Exception(
+            "ENABLE_BANKING_APP_ID mangler"
+        )
+
+    if not os.path.exists(
+        ENABLE_BANKING_PRIVATE_KEY
+    ):
+        raise Exception(
+            "Enable Banking private key findes ikke: "
+            f"{ENABLE_BANKING_PRIVATE_KEY}"
+        )
+
+    with open(
+        ENABLE_BANKING_PRIVATE_KEY,
+        "r",
+        encoding="utf-8"
+    ) as f:
+        private_key = f.read()
+
     response = requests.post(
         f"{ENABLE_BANKING_API_URL}/sessions",
-        headers=enable_headers(),
+        headers={
+            "Authorization": (
+                f"Bearer {ENABLE_BANKING_APP_ID}"
+            ),
+            "Content-Type": "application/json",
+        },
         json={
-            "code": code
+            "code": code,
+            "state": state,
+            "redirect_uri": (
+                f"{APP_URL}/callback"
+            ),
+            "private_key": private_key,
         },
         timeout=60,
     )
@@ -1377,10 +1225,6 @@ async def callback(
         )
 
     current_session = session_data
-
-    # --------------------------------------------------------
-    # Gem session permanent i Supabase
-    # --------------------------------------------------------
 
     save_bank_session(
         session_data

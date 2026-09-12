@@ -64,10 +64,6 @@ AUTH_MAX_AGE = 7 * 24 * 60 * 60
 app = FastAPI()
 
 
-# Enable Banking session is kept in RAM when available.
-# It is also saved in Supabase so automatic sync can
-# continue after a Render restart.
-
 current_session = None
 
 pending_state = None
@@ -195,7 +191,6 @@ async def authentication_middleware(
                 status_code=303
             )
 
-    # Automatic sync is protected by CRON_SECRET.
     if path == "/auto-sync":
 
         token = request.query_params.get(
@@ -745,13 +740,10 @@ def get_active_session():
 
     global current_session
 
-    # First use RAM session.
     if current_session:
 
         return current_session
 
-    # If Render has restarted, recover it
-    # from Supabase.
     session = load_bank_session()
 
     if session:
@@ -775,48 +767,94 @@ def save_accounts(
     accounts
 ):
 
-    rows = []
-
-    for account in accounts:
-
-        rows.append({
-
-            "uid":
-                account.get("uid"),
-
-            "iban":
-                account.get("iban"),
-
-            "name":
-                account.get("name"),
-
-            "currency":
-                account.get("currency")
-        })
-
-    if not rows:
+    if not accounts:
 
         return
 
-    # --------------------------------------------------------
-    # IMPORTANT
-    #
-    # We deliberately do not blindly POST all accounts.
-    # Existing rows are updated and new rows inserted.
-    #
-    # This avoids the previous Supabase 409 problem.
-    # --------------------------------------------------------
+    for account in accounts:
 
-    for row in rows:
-
-        uid = row.get(
+        uid = account.get(
             "uid"
         )
 
+        account_id = (
+            account.get(
+                "account_id"
+            )
+            or {}
+        )
+
+        iban = account_id.get(
+            "iban"
+        )
+
+        name = account.get(
+            "name"
+        )
+
+        currency = account.get(
+            "currency"
+        )
+
         if not uid:
+
+            print(
+                "Skipping account without UID."
+            )
+
             continue
 
-        lookup = requests.get(
+        if not iban:
+
+            print(
+                f"Skipping account {uid}: "
+                "no IBAN found."
+            )
+
+            continue
+
+        # ----------------------------------------------------
+        # 1. Find the stable existing account by IBAN.
+        # ----------------------------------------------------
+
+        lookup_iban = requests.get(
+
+            supabase_url(
+                "accounts"
+            ),
+
+            headers=supabase_headers(),
+
+            params={
+
+                "iban":
+                    f"eq.{iban}",
+
+                "select":
+                    "id,uid,iban",
+
+                "limit":
+                    "1"
+            },
+
+            timeout=60
+        )
+
+        lookup_iban.raise_for_status()
+
+        existing_by_iban = (
+            lookup_iban.json()
+        )
+
+        # ----------------------------------------------------
+        # 2. Check whether this new Enable Banking UID
+        #    already exists in Supabase.
+        #
+        #    This can happen because the previous broken
+        #    version already created the 10 temporary rows.
+        # ----------------------------------------------------
+
+        lookup_uid = requests.get(
 
             supabase_url(
                 "accounts"
@@ -830,7 +868,7 @@ def save_accounts(
                     f"eq.{uid}",
 
                 "select":
-                    "id",
+                    "id,uid,iban",
 
                 "limit":
                     "1"
@@ -839,11 +877,63 @@ def save_accounts(
             timeout=60
         )
 
-        lookup.raise_for_status()
+        lookup_uid.raise_for_status()
 
-        existing = lookup.json()
+        existing_by_uid = (
+            lookup_uid.json()
+        )
 
-        if existing:
+        # ----------------------------------------------------
+        # 3. If the UID exists on a different row than the
+        #    correct IBAN row, delete the duplicate temporary
+        #    row first.
+        # ----------------------------------------------------
+
+        if (
+            existing_by_uid
+            and existing_by_iban
+            and
+            existing_by_uid[0]["id"]
+            != existing_by_iban[0]["id"]
+        ):
+
+            duplicate_id = (
+                existing_by_uid[0]["id"]
+            )
+
+            delete_response = requests.delete(
+
+                supabase_url(
+                    "accounts"
+                ),
+
+                headers=supabase_headers(),
+
+                params={
+
+                    "id":
+                        f"eq.{duplicate_id}"
+                },
+
+                timeout=60
+            )
+
+            delete_response.raise_for_status()
+
+            print(
+                f"Removed duplicate account row "
+                f"{duplicate_id} for UID {uid}."
+            )
+
+        # ----------------------------------------------------
+        # 4. Update existing account by IBAN.
+        # ----------------------------------------------------
+
+        if existing_by_iban:
+
+            account_id_db = (
+                existing_by_iban[0]["id"]
+            )
 
             response = requests.patch(
 
@@ -855,14 +945,43 @@ def save_accounts(
 
                 params={
 
-                    "uid":
-                        f"eq.{uid}"
+                    "id":
+                        f"eq.{account_id_db}"
                 },
 
-                json=row,
+                json={
+
+                    "uid":
+                        uid,
+
+                    "iban":
+                        iban,
+
+                    "name":
+                        name,
+
+                    "currency":
+                        currency,
+
+                    "updated_at":
+                        datetime.now(
+                            timezone.utc
+                        ).isoformat()
+                },
 
                 timeout=60
             )
+
+            response.raise_for_status()
+
+            print(
+                f"Updated account {iban} "
+                f"with UID {uid}."
+            )
+
+        # ----------------------------------------------------
+        # 5. If no account with this IBAN exists, insert it.
+        # ----------------------------------------------------
 
         else:
 
@@ -873,18 +992,42 @@ def save_accounts(
                 ),
 
                 headers={
+
                     **supabase_headers(),
 
                     "Prefer":
                         "return=minimal"
                 },
 
-                json=row,
+                json={
+
+                    "uid":
+                        uid,
+
+                    "iban":
+                        iban,
+
+                    "name":
+                        name,
+
+                    "currency":
+                        currency,
+
+                    "updated_at":
+                        datetime.now(
+                            timezone.utc
+                        ).isoformat()
+                },
 
                 timeout=60
             )
 
-        response.raise_for_status()
+            response.raise_for_status()
+
+            print(
+                f"Inserted new account {iban} "
+                f"with UID {uid}."
+            )
 
 
 # ============================================================
@@ -1721,12 +1864,6 @@ async def callback(
 
     pending_state = None
 
-    # --------------------------------------------------------
-    # NEW:
-    # Save the exact same session that previously lived only
-    # in RAM. Enable Banking itself is NOT changed.
-    # --------------------------------------------------------
-
     try:
 
         save_bank_session(
@@ -1761,10 +1898,6 @@ async def callback(
 
             status_code=500
         )
-
-    # --------------------------------------------------------
-    # Save accounts
-    # --------------------------------------------------------
 
     try:
 
@@ -1822,8 +1955,6 @@ async def callback(
     response_class=HTMLResponse
 )
 async def dashboard():
-
-    global current_session
 
     session = get_active_session()
 
@@ -1993,7 +2124,14 @@ Log ud
 
 <td>
 {escape(
-    str(account.get("iban") or "")
+    str(
+        (
+            account.get("account_id")
+            or {}
+        ).get("iban")
+        or account.get("iban")
+        or ""
+    )
 )}
 </td>
 
@@ -2160,8 +2298,6 @@ async def transactions():
 
 def perform_sync():
 
-    global current_session
-
     session = get_active_session()
 
     if not session:
@@ -2216,10 +2352,6 @@ def perform_sync():
 
         try:
 
-            # ------------------------------------------------
-            # BALANCE
-            # ------------------------------------------------
-
             balance_response = requests.get(
 
                 f"{API_URL}/sessions/"
@@ -2245,10 +2377,6 @@ def perform_sync():
 
                 balance_data
             )
-
-            # ------------------------------------------------
-            # TRANSACTIONS
-            # ------------------------------------------------
 
             raw_transactions = (
                 fetch_all_transactions(

@@ -10,7 +10,7 @@ import json
 import os
 import hmac
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 from html import escape
 
 
@@ -2440,8 +2440,6 @@ Samlet saldo
             negative_class = ""
 
 
-        # Format timestamp for display
-
         display_updated = updated_at
 
         try:
@@ -2570,6 +2568,223 @@ def load_transactions_from_supabase():
 
 
 # ============================================================
+# TRANSACTION DATE
+# ============================================================
+
+def get_transaction_date(
+    transaction
+):
+
+    transaction_date = (
+        transaction.get(
+            "booking_date"
+        )
+        or transaction.get(
+            "value_date"
+        )
+    )
+
+    if not transaction_date:
+
+        return None
+
+    try:
+
+        return date.fromisoformat(
+            str(transaction_date)[:10]
+        )
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# FORMAT TRANSACTION ROW
+# ============================================================
+
+def render_transaction_row(
+    transaction,
+    account_names
+):
+
+    booking_date = (
+        transaction.get(
+            "booking_date"
+        )
+        or ""
+    )
+
+    account_uid = (
+        transaction.get(
+            "account_uid"
+        )
+        or ""
+    )
+
+    account_name = (
+        account_names.get(
+            account_uid,
+            "Ukendt konto"
+        )
+    )
+
+    creditor = (
+        transaction.get(
+            "creditor"
+        )
+        or ""
+    )
+
+    debtor = (
+        transaction.get(
+            "debtor"
+        )
+        or ""
+    )
+
+    description = (
+        transaction.get(
+            "description"
+        )
+        or ""
+    )
+
+    amount = transaction.get(
+        "amount"
+    )
+
+    currency = (
+        transaction.get(
+            "currency"
+        )
+        or ""
+    )
+
+    category = (
+        transaction.get(
+            "category"
+        )
+        or ""
+    )
+
+
+    if debtor:
+
+        counterparty = debtor
+
+    elif creditor:
+
+        counterparty = creditor
+
+    else:
+
+        counterparty = ""
+
+
+    display_date = booking_date
+
+    try:
+
+        parsed_date = datetime.fromisoformat(
+            str(booking_date)
+        )
+
+        display_date = (
+            parsed_date.strftime(
+                "%d-%m-%Y"
+            )
+        )
+
+    except Exception:
+
+        pass
+
+
+    try:
+
+        amount_number = float(
+            amount
+        )
+
+        amount_text = (
+            f"{amount_number:,.2f}"
+            .replace(",", "X")
+            .replace(".", ",")
+            .replace("X", ".")
+        )
+
+        if amount_number > 0:
+
+            amount_class = "positive"
+
+            amount_display = (
+                "+"
+                + amount_text
+            )
+
+        elif amount_number < 0:
+
+            amount_class = "negative"
+
+            amount_display = (
+                amount_text
+            )
+
+        else:
+
+            amount_class = ""
+
+            amount_display = amount_text
+
+    except (
+        TypeError,
+        ValueError
+    ):
+
+        amount_class = ""
+
+        amount_display = ""
+
+
+    return f"""
+
+<tr>
+
+<td class="date">
+{escape(str(display_date))}
+</td>
+
+<td class="account">
+{escape(str(account_name))}
+</td>
+
+<td class="counterparty">
+{escape(str(counterparty))}
+</td>
+
+<td class="description">
+{escape(str(description))}
+</td>
+
+<td class="amount {amount_class}">
+{escape(str(amount_display))}
+</td>
+
+<td>
+{escape(str(currency))}
+</td>
+
+<td class="category">
+{escape(str(category))}
+</td>
+
+</tr>
+
+"""
+
+
+# ============================================================
 # TRANSACTIONS
 # ============================================================
 
@@ -2684,6 +2899,38 @@ pre {{
 
 
     # ========================================================
+    # SPLIT HISTORICAL / FUTURE
+    # ========================================================
+
+    today = date.today()
+
+    historical_transactions = []
+
+    future_transactions = []
+
+    for transaction in transactions_data:
+
+        transaction_date = get_transaction_date(
+            transaction
+        )
+
+        if (
+            transaction_date
+            and transaction_date > today
+        ):
+
+            future_transactions.append(
+                transaction
+            )
+
+        else:
+
+            historical_transactions.append(
+                transaction
+            )
+
+
+    # ========================================================
     # HTML HEADER
     # ========================================================
 
@@ -2758,6 +3005,13 @@ h1 {
 
 }
 
+h2 {
+
+    margin-top:
+        0;
+
+}
+
 nav {
 
     margin-bottom:
@@ -2792,6 +3046,16 @@ nav a:hover {
 
     margin-top:
         12px;
+
+}
+
+.section-info {
+
+    color:
+        #666;
+
+    margin-bottom:
+        15px;
 
 }
 
@@ -2925,6 +3189,30 @@ tr:hover {
 
 }
 
+.future-card {
+
+    border:
+        2px solid #e0a100;
+
+}
+
+.future-header {
+
+    color:
+        #8a6500;
+
+}
+
+.empty {
+
+    color:
+        #777;
+
+    padding:
+        10px 0;
+
+}
+
 </style>
 
 </head>
@@ -2965,8 +3253,8 @@ Log ud
 """
 
     html += (
-        f"Viser {len(transactions_data)} "
-        "seneste transaktioner fra databasen"
+        f"Databasen indeholder {len(transactions_data)} "
+        "viste transaktioner."
     )
 
     html += """
@@ -2975,7 +3263,28 @@ Log ud
 
 </div>
 
-<div class="card">
+
+<!-- ===================================================== -->
+<!-- FUTURE TRANSACTIONS -->
+<!-- ===================================================== -->
+
+<div class="card future-card">
+
+<h2 class="future-header">
+Kommende betalinger
+</h2>
+
+<div class="section-info">
+"""
+
+    html += (
+        f"{len(future_transactions)} "
+        "transaktioner med fremtidig dato."
+    )
+
+    html += """
+
+</div>
 
 <div class="table-container">
 
@@ -3008,181 +3317,111 @@ Log ud
 """
 
 
-    # ========================================================
-    # TRANSACTION ROWS
-    # ========================================================
+    if future_transactions:
 
-    for transaction in transactions_data:
+        for transaction in future_transactions:
 
-        booking_date = (
-            transaction.get(
-                "booking_date"
-            )
-            or ""
-        )
-
-        account_uid = (
-            transaction.get(
-                "account_uid"
-            )
-            or ""
-        )
-
-        account_name = (
-            account_names.get(
-                account_uid,
-                "Ukendt konto"
-            )
-        )
-
-        creditor = (
-            transaction.get(
-                "creditor"
-            )
-            or ""
-        )
-
-        debtor = (
-            transaction.get(
-                "debtor"
-            )
-            or ""
-        )
-
-        description = (
-            transaction.get(
-                "description"
-            )
-            or ""
-        )
-
-        amount = transaction.get(
-            "amount"
-        )
-
-        currency = (
-            transaction.get(
-                "currency"
-            )
-            or ""
-        )
-
-        category = (
-            transaction.get(
-                "category"
-            )
-            or ""
-        )
-
-
-        if debtor:
-
-            counterparty = debtor
-
-        elif creditor:
-
-            counterparty = creditor
-
-        else:
-
-            counterparty = ""
-
-
-        display_date = booking_date
-
-        try:
-
-            parsed_date = datetime.fromisoformat(
-                str(booking_date)
+            html += render_transaction_row(
+                transaction,
+                account_names
             )
 
-            display_date = (
-                parsed_date.strftime(
-                    "%d-%m-%Y"
-                )
-            )
+    else:
 
-        except Exception:
-
-            pass
-
-
-        try:
-
-            amount_number = float(
-                amount
-            )
-
-            amount_text = (
-                f"{amount_number:,.2f}"
-                .replace(",", "X")
-                .replace(".", ",")
-                .replace("X", ".")
-            )
-
-            if amount_number > 0:
-
-                amount_class = "positive"
-
-                amount_display = (
-                    "+"
-                    + amount_text
-                )
-
-            elif amount_number < 0:
-
-                amount_class = "negative"
-
-                amount_display = (
-                    amount_text
-                )
-
-            else:
-
-                amount_class = ""
-
-                amount_display = amount_text
-
-        except (
-            TypeError,
-            ValueError
-        ):
-
-            amount_class = ""
-
-            amount_display = ""
-
-
-        html += f"""
+        html += """
 
 <tr>
 
-<td class="date">
-{escape(str(display_date))}
+<td colspan="7" class="empty">
+Ingen kommende betalinger.
 </td>
 
-<td class="account">
-{escape(str(account_name))}
-</td>
+</tr>
 
-<td class="counterparty">
-{escape(str(counterparty))}
-</td>
+"""
 
-<td class="description">
-{escape(str(description))}
-</td>
 
-<td class="amount {amount_class}">
-{escape(str(amount_display))}
-</td>
+    html += """
 
-<td>
-{escape(str(currency))}
-</td>
+</tbody>
 
-<td class="category">
-{escape(str(category))}
+</table>
+
+</div>
+
+</div>
+
+
+<!-- ===================================================== -->
+<!-- HISTORICAL TRANSACTIONS -->
+<!-- ===================================================== -->
+
+<div class="card">
+
+<h2>
+Historik
+</h2>
+
+<div class="section-info">
+"""
+
+    html += (
+        f"{len(historical_transactions)} "
+        "historiske/bogførte transaktioner."
+    )
+
+    html += """
+
+</div>
+
+<div class="table-container">
+
+<table>
+
+<thead>
+
+<tr>
+
+<th>Dato</th>
+
+<th>Konto</th>
+
+<th>Modpart</th>
+
+<th>Beskrivelse</th>
+
+<th>Beløb</th>
+
+<th>Valuta</th>
+
+<th>Kategori</th>
+
+</tr>
+
+</thead>
+
+<tbody>
+
+"""
+
+
+    if historical_transactions:
+
+        for transaction in historical_transactions:
+
+            html += render_transaction_row(
+                transaction,
+                account_names
+            )
+
+    else:
+
+        html += """
+
+<tr>
+
+<td colspan="7" class="empty">
+Ingen historiske transaktioner.
 </td>
 
 </tr>

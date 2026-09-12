@@ -99,7 +99,7 @@ def read_root():
 
 @app.get("/dashboard", response_class=HTMLResponse)
 def get_dashboard():
-    """Returnerer en enkel HTML-grænseflade til visning og oprettelse af transaktioner."""
+    """Returnerer en enkel HTML-grænseflade til visning af transaktioner."""
     conn = None
     rows = []
     try:

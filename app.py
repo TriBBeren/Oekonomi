@@ -1,18 +1,16 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import RedirectResponse, HTMLResponse, JSONResponse
-
-import jwt
-import time
-import requests
-import uuid
-import hashlib
-import json
 import os
+import json
+import time
+import uuid
 import hmac
-
-from datetime import datetime, timedelta, timezone, date
+import hashlib
+from datetime import datetime, timezone
 from html import escape
 
+import jwt
+import requests
+from fastapi import FastAPI, Request
+from fastapi.responses import RedirectResponse, HTMLResponse, JSONResponse
 
 # ============================================================
 # CONFIGURATION & ENVIRONMENT
@@ -31,18 +29,10 @@ APP_PASSWORD = os.getenv("APP_PASSWORD")
 CRON_SECRET = os.getenv("CRON_SECRET")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-
-# ============================================================
-# AUTHENTICATION CONFIGURATION
-# ============================================================
-
 AUTH_COOKIE = "oekonomi_auth"
 AUTH_MAX_AGE = 7 * 24 * 60 * 60
 
 app = FastAPI()
-current_session = None
-pending_state = None
-
 
 # ============================================================
 # AUTHENTICATION UTILS & MIDDLEWARE
@@ -143,22 +133,24 @@ def supabase_url(table):
 # ============================================================
 
 def categorize_batch_with_ai(transactions_batch):
-    """
-    Sender usorterede transaktioner til OpenAI for automatisk kategorisering.
-    """
     if not OPENAI_API_KEY or not transactions_batch:
         return transactions_batch
 
-    # Forbered minimal data til AI prompt for at reducere token-forbrug
-    simplified_batch = []
-    for tx in transactions_batch:
-        simplified_batch.append({
+    # Filtrer kun transaktioner fra som ikke allerede har en kategori
+    unprocessed = [tx for tx in transactions_batch if not tx.get("category")]
+    if not unprocessed:
+        return transactions_batch
+
+    simplified_batch = [
+        {
             "id": tx["transaction_id"],
             "amount": tx["amount"],
             "creditor": tx.get("creditor"),
             "debtor": tx.get("debtor"),
             "desc": tx.get("description")
-        })
+        }
+        for tx in unprocessed
+    ]
 
     prompt = f"""
     Du er en ekspert i dansk privatøkonomi. Analyser og kategoriser følgende transaktioner.
@@ -170,13 +162,15 @@ def categorize_batch_with_ai(transactions_batch):
     {json.dumps(simplified_batch, ensure_ascii=False)}
 
     Svar UDELUKKENDE med gyldigt JSON i formatet:
-    [
-        {{
-            "id": "transaktions_id",
-            "category": "Kategorinavn",
-            "is_recurring": true/false
-        }}
-    ]
+    {{
+        "items": [
+            {{
+                "id": "transaktions_id",
+                "category": "Kategorinavn",
+                "is_recurring": true
+            }}
+        ]
+    }}
     """
 
     try:
@@ -195,16 +189,16 @@ def categorize_batch_with_ai(transactions_batch):
             timeout=30
         )
         res.raise_for_status()
-        result_data = res.json()["choices"][0]["message"]["content"]
+        raw_content = res.json()["choices"][0]["message"]["content"]
+        parsed_data = json.loads(raw_content)
         
-        # Parse JSON svar
-        parsed_results = json.loads(result_data)
-        if isinstance(parsed_results, dict) and "transactions" in parsed_results:
-            parsed_results = parsed_results["transactions"]
+        # Ekstraher liste uanset hvilken nøgle AI benytter
+        items = parsed_data.get("items") or parsed_data.get("transactions") or []
+        if isinstance(parsed_data, list):
+            items = parsed_data
 
-        # Map tilbage til transaktions-objekter
-        cat_map = {item["id"]: item for item in parsed_results if "id" in item}
-        
+        cat_map = {item["id"]: item for item in items if isinstance(item, dict) and "id" in item}
+
         for tx in transactions_batch:
             tx_id = tx["transaction_id"]
             if tx_id in cat_map:
@@ -257,17 +251,6 @@ def load_bank_session():
     response.raise_for_status()
     rows = response.json()
     return rows[0].get("session_data") if rows else None
-
-
-def get_active_session():
-    global current_session
-    if current_session:
-        return current_session
-    session = load_bank_session()
-    if session:
-        current_session = session
-        return session
-    return None
 
 
 def save_accounts(accounts):
@@ -384,7 +367,6 @@ def save_transactions(transactions):
     if not transactions:
         return 0
 
-    # Kør AI kategorisering på nye/usorterede transaktioner før lagring
     categorized_transactions = categorize_batch_with_ai(transactions)
 
     saved = 0
@@ -409,9 +391,9 @@ def save_transactions(transactions):
 # ============================================================
 
 def run_sync_pipeline():
-    session = get_active_session()
+    session = load_bank_session()
     if not session:
-        raise Exception("Ingen aktiv bank session fundet.")
+        raise Exception("Ingen aktiv bank-session fundet.")
 
     session_id = session.get("session_id")
     accounts = session.get("accounts", [])
@@ -425,8 +407,7 @@ def run_sync_pipeline():
         uid = acc.get("uid")
         if not uid:
             continue
-        
-        # Hent og gem balancere
+
         try:
             bal_res = requests.get(
                 f"{API_URL}/sessions/{session_id}/accounts/{uid}/balances",
@@ -453,7 +434,6 @@ def run_sync_pipeline():
         except Exception as e:
             print(f"Balance update fejl for {uid}: {e}")
 
-        # Hent transaktioner
         raw_txs = fetch_all_transactions(session_id, uid)
         converted = [convert_transaction(uid, tx) for tx in raw_txs]
         total_saved += save_transactions(converted)
@@ -555,10 +535,6 @@ async def auto_sync():
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 
-# ============================================================
-# API ENDPOINTS FOR FRONTEND DASHBOARD
-# ============================================================
-
 @app.get("/api/dashboard-data")
 async def get_dashboard_data():
     accounts = load_accounts_from_supabase()
@@ -566,7 +542,6 @@ async def get_dashboard_data():
 
     total_balance = sum(float(a.get("last_balance") or 0) for a in accounts)
 
-    # Beregn indtægter og udgifter pr. kategori
     category_expenses = {}
     monthly_income = 0.0
     monthly_expenses = 0.0
@@ -598,19 +573,18 @@ async def get_dashboard_data():
 
 @app.get("/api/ai-insights")
 async def get_ai_insights():
-    """
-    Genererer personlig AI-analyse af privatøkonomien baseret på de seneste poster.
-    """
     if not OPENAI_API_KEY:
-        return JSONResponse({"insights": ["Tilføj OPENAI_API_KEY for at aktivere AI-rådgivning."] })
+        return JSONResponse({"insights": ["Tilføj OPENAI_API_KEY for at aktivere AI-rådgivning."]})
 
     transactions = load_transactions_from_supabase(limit=300)
     
-    # Osummering til prompt
     summary = {}
     for tx in transactions:
         cat = tx.get("category", "Diverse")
-        amt = float(tx.get("amount", 0))
+        try:
+            amt = float(tx.get("amount", 0))
+        except ValueError:
+            amt = 0.0
         summary[cat] = summary.get(cat, 0) + amt
 
     prompt = f"""
@@ -618,7 +592,7 @@ async def get_ai_insights():
     {json.dumps(summary, ensure_ascii=False)}
 
     Giv mig 3 præcise, konkrete og opmuntrende sparetips eller observationer på dansk baseret på disse data.
-    Returner svaret som et JSON array af strenge, f.eks.: ["Tip 1", "Tip 2", "Tip 3"]
+    Returner svaret som gyldigt JSON med nøglen "insights": ["Tip 1", "Tip 2", "Tip 3"]
     """
 
     try:
@@ -635,11 +609,7 @@ async def get_ai_insights():
         )
         res.raise_for_status()
         insights_data = json.loads(res.json()["choices"][0]["message"]["content"])
-        
-        if isinstance(insights_data, dict):
-            insights = list(insights_data.values())[0]
-        else:
-            insights = insights_data
+        insights = insights_data.get("insights", ["Ingen analyser tilgængelige."])
 
         return JSONResponse({"insights": insights})
     except Exception as e:
@@ -660,28 +630,23 @@ async def dashboard():
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Økonomi Dashboard</title>
-        <!-- Tailwind CSS & Chart.js -->
         <script src="https://cdn.tailwindcss.com"></script>
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     </head>
     <body class="h-full font-sans text-slate-800">
         <div class="min-h-full">
-            <!-- Navigation -->
             <nav class="bg-slate-900 text-white p-4 shadow-md">
                 <div class="max-w-7xl mx-auto flex justify-between items-center">
                     <h1 class="text-xl font-bold tracking-wide">Økonomi & AI Dashboard</h1>
                     <div class="space-x-3">
                         <a href="/sync" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg text-sm font-medium transition">Synkroniser Bank</a>
-                        <a href="/start" class="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg text-sm font-medium transition">Forbind Ny Bank</a>
                         <a href="/logout" class="bg-red-600 hover:bg-red-500 px-4 py-2 rounded-lg text-sm font-medium transition">Log ud</a>
                     </div>
                 </div>
             </nav>
 
-            <!-- Main Content -->
             <main class="max-w-7xl mx-auto p-6 space-y-6">
                 
-                <!-- KPI Top Cards -->
                 <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
                     <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
                         <p class="text-sm font-medium text-slate-500">Samlet Balance</p>
@@ -697,7 +662,6 @@ async def dashboard():
                     </div>
                 </div>
 
-                <!-- AI Optimering Widget -->
                 <div class="bg-gradient-to-r from-indigo-900 to-slate-900 text-white p-6 rounded-xl shadow-md">
                     <div class="flex items-center justify-between mb-4">
                         <h3 class="text-lg font-bold flex items-center gap-2">
@@ -712,7 +676,6 @@ async def dashboard():
                     </ul>
                 </div>
 
-                <!-- Grafer Grid -->
                 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
                     <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
                         <h3 class="text-base font-bold text-slate-800 mb-4">Forbrug pr. Kategori</h3>
@@ -723,12 +686,10 @@ async def dashboard():
                     <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
                         <h3 class="text-base font-bold text-slate-800 mb-4">Konti Oversigt</h3>
                         <div id="accountsList" class="space-y-3">
-                            <!-- Dynamisk indhold -->
                         </div>
                     </div>
                 </div>
 
-                <!-- Transaktionstabel -->
                 <div class="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
                     <div class="p-6 border-b border-slate-100">
                         <h3 class="text-base font-bold text-slate-800">Seneste Transaktioner</h3>
@@ -744,7 +705,6 @@ async def dashboard():
                                 </tr>
                             </thead>
                             <tbody id="transactionTable" class="divide-y divide-slate-100 text-slate-700">
-                                <!-- Dynamisk indhold -->
                             </tbody>
                         </table>
                     </div>
@@ -756,18 +716,18 @@ async def dashboard():
         <script>
             let categoryChart = null;
 
+            function floatVal(v) { return parseFloat(v) || 0; }
+
             async function initDashboard() {
                 const res = await fetch('/api/dashboard-data');
                 const data = await res.json();
 
-                // Format DKK
                 const fmt = (n) => new Intl.NumberFormat('da-DK', { style: 'currency', currency: 'DKK' }).format(n);
 
                 document.getElementById('totalBalance').innerText = fmt(data.total_balance);
                 document.getElementById('monthlyIncome').innerText = fmt(data.monthly_income);
                 document.getElementById('monthlyExpenses').innerText = fmt(data.monthly_expenses);
 
-                // Render Konti
                 const accList = document.getElementById('accountsList');
                 accList.innerHTML = data.accounts.map(a => `
                     <div class="flex justify-between items-center p-3 bg-slate-50 rounded-lg">
@@ -779,7 +739,6 @@ async def dashboard():
                     </div>
                 `).join('');
 
-                // Render Transaktioner
                 const txTable = document.getElementById('transactionTable');
                 txTable.innerHTML = data.recent_transactions.map(t => {
                     const isExp = floatVal(t.amount) < 0;
@@ -793,14 +752,9 @@ async def dashboard():
                     `;
                 }).join('');
 
-                // Render Graph
                 renderChart(data.category_expenses);
-
-                // Hent AI Insights
                 loadAIInsights();
             }
-
-            function floatVal(v) { return parseFloat(v) || 0; }
 
             function renderChart(categoryExpenses) {
                 const ctx = document.getElementById('categoryChart').getContext('2d');

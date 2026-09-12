@@ -47,7 +47,7 @@ def test_enable():
         token = create_jwt()
 
         response = requests.get(
-            "https://api.enablebanking.com/application",
+            "https://api.enablebanking.com/accounts",
             headers={
                 "Authorization": f"Bearer {token}",
                 "Accept": "application/json",

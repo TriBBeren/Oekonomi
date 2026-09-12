@@ -237,15 +237,9 @@ def convert_transaction(account_uid, transaction):
         {}
     )
 
-    creditor = transaction.get(
-        "creditor",
-        {}
-    )
+creditor = transaction.get("creditor") or {}
 
-    debtor = transaction.get(
-        "debtor",
-        {}
-    )
+debtor = transaction.get("debtor") or {}
 
     remittance = transaction.get(
         "remittance_information",

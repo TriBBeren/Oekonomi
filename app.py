@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+code = '''from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse, HTMLResponse, JSONResponse
 
 import jwt
@@ -149,7 +149,6 @@ def categorize_batch_with_ai(transactions_batch):
     if not OPENAI_API_KEY or not transactions_batch:
         return transactions_batch
 
-    # Forbered minimal data til AI prompt for at reducere token-forbrug
     simplified_batch = []
     for tx in transactions_batch:
         simplified_batch.append({
@@ -197,13 +196,11 @@ def categorize_batch_with_ai(transactions_batch):
         res.raise_for_status()
         result_data = res.json()["choices"][0]["message"]["content"]
         
-        # Parse JSON svar
         parsed_results = json.loads(result_data)
         if isinstance(parsed_results, dict) and "transactions" in parsed_results:
             parsed_results = parsed_results["transactions"]
 
-        # Map tilbage til transaktions-objekter
-        cat_map = {item["id"]: item for item in parsed_results if "id" in item}
+        cat_map = {item["id"]: item for item in parsed_results if isinstance(item, dict) and "id" in item}
         
         for tx in transactions_batch:
             tx_id = tx["transaction_id"]
@@ -286,6 +283,7 @@ def save_accounts(accounts):
         response = requests.post(
             supabase_url("accounts"),
             headers={**supabase_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"},
+            params={"on_conflict": "uid"},
             json={
                 "uid": uid,
                 "iban": iban,
@@ -384,7 +382,6 @@ def save_transactions(transactions):
     if not transactions:
         return 0
 
-    # Kør AI kategorisering på nye/usorterede transaktioner før lagring
     categorized_transactions = categorize_batch_with_ai(transactions)
 
     saved = 0
@@ -426,7 +423,6 @@ def run_sync_pipeline():
         if not uid:
             continue
         
-        # Hent og gem balancere
         try:
             bal_res = requests.get(
                 f"{API_URL}/sessions/{session_id}/accounts/{uid}/balances",
@@ -453,7 +449,6 @@ def run_sync_pipeline():
         except Exception as e:
             print(f"Balance update fejl for {uid}: {e}")
 
-        # Hent transaktioner
         raw_txs = fetch_all_transactions(session_id, uid)
         converted = [convert_transaction(uid, tx) for tx in raw_txs]
         total_saved += save_transactions(converted)
@@ -537,6 +532,65 @@ async def logout():
     return response
 
 
+@app.get("/start")
+async def start_auth():
+    global pending_state
+    pending_state = str(uuid.uuid4())
+    
+    payload = {
+        "access": {
+            "valid_until": (datetime.now(timezone.utc) + timedelta(days=89)).isoformat()
+        },
+        "redirect_url": REDIRECT_URL,
+        "state": pending_state
+    }
+    
+    response = requests.post(
+        f"{API_URL}/auth",
+        headers=eb_headers(),
+        json=payload,
+        timeout=60
+    )
+    response.raise_for_status()
+    auth_data = response.json()
+    
+    return RedirectResponse(auth_data["url"], status_code=303)
+
+
+@app.get("/callback")
+async def callback(request: Request):
+    global current_session, pending_state
+    code = request.query_params.get("code")
+    state = request.query_params.get("state")
+    
+    if not code:
+        return HTMLResponse("<h1>Fejl: Manglende autorisationskode</h1>", status_code=400)
+    
+    if pending_state and state != pending_state:
+        return HTMLResponse("<h1>Fejl: Ugyldig state (sikkerhedstjek fejlede)</h1>", status_code=400)
+    
+    payload = {"code": code}
+    response = requests.post(
+        f"{API_URL}/sessions",
+        headers=eb_headers(),
+        json=payload,
+        timeout=60
+    )
+    response.raise_for_status()
+    session_data = response.json()
+    
+    current_session = session_data
+    save_bank_session(session_data)
+    
+    # Kør første synkronisering automatisk
+    try:
+        run_sync_pipeline()
+    except Exception as e:
+        print(f"Fejl ved første synkronisering i callback: {e}")
+        
+    return RedirectResponse("/", status_code=303)
+
+
 @app.get("/sync")
 async def sync():
     try:
@@ -547,7 +601,7 @@ async def sync():
 
 
 @app.get("/auto-sync")
-async def auto_sync():
+async def auto_sync(request: Request):
     try:
         saved = run_sync_pipeline()
         return JSONResponse({"success": True, "saved_transactions": saved})
@@ -566,7 +620,6 @@ async def get_dashboard_data():
 
     total_balance = sum(float(a.get("last_balance") or 0) for a in accounts)
 
-    # Beregn indtægter og udgifter pr. kategori
     category_expenses = {}
     monthly_income = 0.0
     monthly_expenses = 0.0
@@ -602,15 +655,17 @@ async def get_ai_insights():
     Genererer personlig AI-analyse af privatøkonomien baseret på de seneste poster.
     """
     if not OPENAI_API_KEY:
-        return JSONResponse({"insights": ["Tilføj OPENAI_API_KEY for at aktivere AI-rådgivning."] })
+        return JSONResponse({"insights": ["Tilføj OPENAI_API_KEY for at aktivere AI-rådgivning."]})
 
     transactions = load_transactions_from_supabase(limit=300)
     
-    # Osummering til prompt
     summary = {}
     for tx in transactions:
         cat = tx.get("category", "Diverse")
-        amt = float(tx.get("amount", 0))
+        try:
+            amt = float(tx.get("amount", 0))
+        except ValueError:
+            amt = 0.0
         summary[cat] = summary.get(cat, 0) + amt
 
     prompt = f"""
@@ -760,14 +815,12 @@ async def dashboard():
                 const res = await fetch('/api/dashboard-data');
                 const data = await res.json();
 
-                // Format DKK
                 const fmt = (n) => new Intl.NumberFormat('da-DK', { style: 'currency', currency: 'DKK' }).format(n);
 
                 document.getElementById('totalBalance').innerText = fmt(data.total_balance);
                 document.getElementById('monthlyIncome').innerText = fmt(data.monthly_income);
                 document.getElementById('monthlyExpenses').innerText = fmt(data.monthly_expenses);
 
-                // Render Konti
                 const accList = document.getElementById('accountsList');
                 accList.innerHTML = data.accounts.map(a => `
                     <div class="flex justify-between items-center p-3 bg-slate-50 rounded-lg">
@@ -779,7 +832,6 @@ async def dashboard():
                     </div>
                 `).join('');
 
-                // Render Transaktioner
                 const txTable = document.getElementById('transactionTable');
                 txTable.innerHTML = data.recent_transactions.map(t => {
                     const isExp = floatVal(t.amount) < 0;
@@ -793,10 +845,7 @@ async def dashboard():
                     `;
                 }).join('');
 
-                // Render Graph
                 renderChart(data.category_expenses);
-
-                // Hent AI Insights
                 loadAIInsights();
             }
 
@@ -840,3 +889,9 @@ async def dashboard():
     </body>
     </html>
     """
+'''
+
+with open("main.py", "w", encoding="utf-8") as f:
+    f.write(code)
+
+print("main.py was generated successfully.")

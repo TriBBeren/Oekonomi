@@ -1,538 +1,597 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import RedirectResponse, HTMLResponse, JSONResponse
-
-import jwt
-import time
-import requests
-import uuid
-import hashlib
-import json
 import os
-import hmac
+import json
+import logging
+from datetime import datetime, timezone
+from urllib.parse import urlencode
 
-from datetime import datetime, timedelta, timezone
-from html import escape
+import requests
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 
 # ============================================================
-# CONFIGURATION
+# LOGGING
 # ============================================================
 
-APP_ID = "a2a55118-0acc-4c22-a836-ea8f6f600983"
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("oekonomi")
 
-PRIVATE_KEY_FILE = "/etc/secrets/enable_banking_private_key.pem"
 
-REDIRECT_URL = "https://oekonomi.onrender.com/callback"
+# ============================================================
+# ENVIRONMENT
+# ============================================================
 
-API_URL = "https://api.enablebanking.com"
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 
-SUPABASE_URL = os.getenv(
-    "SUPABASE_URL",
-    "https://wwjiroaezgwtbcxteuiz.supabase.co"
+ENABLE_BANKING_API_URL = os.getenv(
+    "ENABLE_BANKING_API_URL",
+    "https://api.enablebanking.com"
+).rstrip("/")
+
+ENABLE_BANKING_APP_ID = os.getenv("ENABLE_BANKING_APP_ID", "")
+ENABLE_BANKING_PRIVATE_KEY = os.getenv(
+    "ENABLE_BANKING_PRIVATE_KEY",
+    "/etc/secrets/enable_banking_private_key.pem"
 )
 
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+CRON_SECRET = os.getenv("CRON_SECRET", "")
 
-APP_USERNAME = os.getenv("APP_USERNAME")
-APP_PASSWORD = os.getenv("APP_PASSWORD")
-
-CRON_SECRET = os.getenv("CRON_SECRET")
-
-
-# ============================================================
-# AUTHENTICATION CONFIGURATION
-# ============================================================
+APP_URL = os.getenv(
+    "APP_URL",
+    "https://oekonomi.onrender.com"
+).rstrip("/")
 
 AUTH_COOKIE = "oekonomi_auth"
-
-AUTH_MAX_AGE = 7 * 24 * 60 * 60
+AUTH_VALUE = os.getenv("AUTH_VALUE", "1")
 
 
 # ============================================================
-# FASTAPI
+# APP
 # ============================================================
 
 app = FastAPI()
 
 
 # ============================================================
-# RUNTIME STATE
+# ENABLE BANKING SESSION
 # ============================================================
 
-# Session is cached in RAM for fast access.
-# The permanent copy is stored in Supabase.
 current_session = None
-
-# OAuth state used during Enable Banking login.
 pending_state = None
 
 
 # ============================================================
-# STARTUP WARNINGS
+# SUPABASE HELPERS
 # ============================================================
 
-if not APP_USERNAME:
-    print("WARNING: APP_USERNAME is not configured.")
-
-if not APP_PASSWORD:
-    print("WARNING: APP_PASSWORD is not configured.")
-
-if not SUPABASE_SERVICE_KEY:
-    print("WARNING: SUPABASE_SERVICE_KEY is not configured.")
-
-if not CRON_SECRET:
-    print("WARNING: CRON_SECRET is not configured.")
-
-
-# ============================================================
-# AUTHENTICATION
-# ============================================================
-
-def make_auth_token():
-
-    timestamp = str(
-        int(time.time())
-    )
-
-    signature = hmac.new(
-        APP_PASSWORD.encode("utf-8"),
-        timestamp.encode("utf-8"),
-        hashlib.sha256
-    ).hexdigest()
-
-    return f"{timestamp}.{signature}"
-
-
-def valid_auth_token(token):
-
-    if not token:
-        return False
-
-    if not APP_PASSWORD:
-        return False
-
-    try:
-
-        timestamp_text, signature = token.split(
-            ".",
-            1
-        )
-
-        timestamp = int(
-            timestamp_text
-        )
-
-        now = time.time()
-
-        if now - timestamp > AUTH_MAX_AGE:
-            return False
-
-        if timestamp > now + 60:
-            return False
-
-        expected_signature = hmac.new(
-            APP_PASSWORD.encode("utf-8"),
-            timestamp_text.encode("utf-8"),
-            hashlib.sha256
-        ).hexdigest()
-
-        return hmac.compare_digest(
-            signature,
-            expected_signature
-        )
-
-    except Exception:
-
-        return False
-
-
-def is_authenticated(request: Request):
-
-    token = request.cookies.get(
-        AUTH_COOKIE
-    )
-
-    return valid_auth_token(token)
-
-
-# ============================================================
-# CRON AUTHENTICATION
-# ============================================================
-
-def valid_cron_token(token):
-
-    if not token:
-        return False
-
-    if not CRON_SECRET:
-        return False
-
-    return hmac.compare_digest(
-        str(token),
-        str(CRON_SECRET)
-    )
-
-
-# ============================================================
-# AUTHENTICATION MIDDLEWARE
-# ============================================================
-
-@app.middleware("http")
-async def authentication_middleware(
-    request: Request,
-    call_next
-):
-
-    path = request.url.path
-
-    # Public paths.
-    public_paths = {
-        "/login",
-        "/logout"
+def supabase_headers():
+    return {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
     }
 
-    # Automatic sync is authenticated separately
-    # using CRON_SECRET.
-    if path == "/auto-sync":
 
-        token = request.query_params.get(
-            "token"
-        )
+def supabase_url(table):
+    return f"{SUPABASE_URL}/rest/v1/{table}"
 
-        if valid_cron_token(token):
+
+def save_bank_session(session_data):
+    """
+    Gem Enable Banking session i Supabase.
+    """
+
+    if not session_data:
+        return
+
+    session_id = session_data.get("session_id")
+
+    if not session_id:
+        logger.warning("Bank session mangler session_id")
+        return
+
+    payload = {
+        "session_id": session_id,
+        "session_data": session_data,
+        "status": "active",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    response = requests.post(
+        supabase_url("bank_sessions"),
+        headers={
+            **supabase_headers(),
+            "Prefer": "resolution=merge-duplicates,return=minimal",
+        },
+        json=payload,
+        timeout=30,
+    )
+
+    response.raise_for_status()
+
+    logger.info("Bank session gemt i Supabase")
+
+
+def load_bank_session():
+    """
+    Hent seneste aktive Enable Banking session fra Supabase.
+    """
+
+    response = requests.get(
+        supabase_url("bank_sessions"),
+        headers=supabase_headers(),
+        params={
+            "status": "eq.active",
+            "order": "updated_at.desc",
+            "limit": "1",
+        },
+        timeout=30,
+    )
+
+    response.raise_for_status()
+
+    rows = response.json()
+
+    if not rows:
+        logger.warning("Ingen aktiv bank session fundet")
+        return None
+
+    session_data = rows[0].get("session_data")
+
+    if not session_data:
+        logger.warning("Bank session eksisterer, men session_data mangler")
+        return None
+
+    return session_data
+
+
+# ============================================================
+# ACCOUNT SYNC
+# ============================================================
+
+def save_account(account):
+    """
+    Gem/opdater én konto.
+
+    Vigtigt:
+    uid er den stabile nøgle fra Enable Banking.
+    Derfor bruger vi UPSERT på uid i stedet for almindelig INSERT.
+    """
+
+    uid = account.get("uid")
+
+    if not uid:
+        logger.warning("Springer konto over uden uid")
+        return
+
+    payload = {
+        "uid": uid,
+        "iban": account.get("iban"),
+        "name": account.get("name"),
+        "currency": account.get("currency"),
+        "last_balance": account.get("last_balance"),
+        "balance_type": account.get("balance_type"),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    response = requests.post(
+        supabase_url("accounts"),
+        headers={
+            **supabase_headers(),
+            "Prefer": "resolution=merge-duplicates,return=minimal",
+        },
+        json=payload,
+        params={
+            "on_conflict": "uid",
+        },
+        timeout=30,
+    )
+
+    response.raise_for_status()
+
+
+def save_transaction(transaction):
+    """
+    Gem én transaktion.
+
+    account_uid + transaction_id er unik nøgle i databasen.
+    """
+
+    account_uid = transaction.get("account_uid")
+    transaction_id = transaction.get("transaction_id")
+
+    if not account_uid or not transaction_id:
+        logger.warning("Springer transaktion over uden account_uid/transaction_id")
+        return
+
+    payload = {
+        "account_uid": account_uid,
+        "transaction_id": transaction_id,
+        "booking_date": transaction.get("booking_date"),
+        "value_date": transaction.get("value_date"),
+        "amount": transaction.get("amount"),
+        "currency": transaction.get("currency"),
+        "creditor": transaction.get("creditor"),
+        "debtor": transaction.get("debtor"),
+        "description": transaction.get("description"),
+        "category": transaction.get("category"),
+        "raw_data": transaction.get("raw_data"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    response = requests.post(
+        supabase_url("transactions"),
+        headers={
+            **supabase_headers(),
+            "Prefer": "resolution=merge-duplicates,return=minimal",
+        },
+        json=payload,
+        params={
+            "on_conflict": "account_uid,transaction_id",
+        },
+        timeout=30,
+    )
+
+    response.raise_for_status()
+
+
+# ============================================================
+# ENABLE BANKING API
+# ============================================================
+
+def get_accounts(session):
+    """
+    Hent konti fra Enable Banking.
+    """
+
+    session_id = session.get("session_id")
+
+    if not session_id:
+        raise Exception("Session mangler session_id")
+
+    response = requests.get(
+        f"{ENABLE_BANKING_API_URL}/accounts",
+        headers={
+            "Authorization": f"Bearer {session_id}",
+            "Accept": "application/json",
+        },
+        timeout=60,
+    )
+
+    response.raise_for_status()
+
+    return response.json()
+
+
+def get_account_balance(session, account_uid):
+    """
+    Hent saldo for en konto.
+    """
+
+    session_id = session.get("session_id")
+
+    response = requests.get(
+        f"{ENABLE_BANKING_API_URL}/accounts/{account_uid}/balances",
+        headers={
+            "Authorization": f"Bearer {session_id}",
+            "Accept": "application/json",
+        },
+        timeout=60,
+    )
+
+    response.raise_for_status()
+
+    return response.json()
+
+
+def get_account_transactions(session, account_uid):
+    """
+    Hent transaktioner for en konto.
+    """
+
+    session_id = session.get("session_id")
+
+    response = requests.get(
+        f"{ENABLE_BANKING_API_URL}/accounts/{account_uid}/transactions",
+        headers={
+            "Authorization": f"Bearer {session_id}",
+            "Accept": "application/json",
+        },
+        timeout=60,
+    )
+
+    response.raise_for_status()
+
+    return response.json()
+
+
+# ============================================================
+# SYNC
+# ============================================================
+
+def perform_sync():
+    """
+    Fælles synkroniseringsfunktion.
+
+    Bruges både af /sync og /auto-sync.
+    """
+
+    global current_session
+
+    logger.info("Starter bank sync")
+
+    # --------------------------------------------------------
+    # Hent session
+    # --------------------------------------------------------
+
+    session = current_session
+
+    if not session:
+        logger.info("Ingen session i RAM - henter fra Supabase")
+        session = load_bank_session()
+
+    if not session:
+        raise Exception("Ingen aktiv bank session")
+
+    current_session = session
+
+    # --------------------------------------------------------
+    # Hent konti
+    # --------------------------------------------------------
+
+    accounts_response = get_accounts(session)
+
+    if isinstance(accounts_response, dict):
+        accounts = accounts_response.get("accounts", [])
+    else:
+        accounts = accounts_response
+
+    logger.info("Enable Banking returnerede %s konti", len(accounts))
+
+    # --------------------------------------------------------
+    # Gem konti og hent data
+    # --------------------------------------------------------
+
+    saved_accounts = 0
+    saved_transactions = 0
+
+    for account in accounts:
+
+        uid = account.get("uid")
+
+        if not uid:
+            logger.warning("Konto uden uid springes over")
+            continue
+
+        # ----------------------------------------------------
+        # Grundlæggende kontooplysninger
+        # ----------------------------------------------------
+
+        account_data = {
+            "uid": uid,
+            "iban": account.get("iban"),
+            "name": account.get("name"),
+            "currency": account.get("currency"),
+            "last_balance": None,
+            "balance_type": None,
+        }
+
+        # ----------------------------------------------------
+        # Hent saldo
+        # ----------------------------------------------------
+
+        try:
+            balance_response = get_account_balance(
+                session,
+                uid
+            )
+
+            balances = balance_response.get("balances", [])
+
+            if balances:
+                balance = balances[0]
+
+                amount = balance.get("balanceAmount", {})
+
+                account_data["last_balance"] = amount.get("amount")
+                account_data["currency"] = (
+                    amount.get("currency")
+                    or account_data["currency"]
+                )
+
+                account_data["balance_type"] = balance.get(
+                    "balanceType"
+                )
+
+        except Exception as exc:
+            logger.warning(
+                "Kunne ikke hente saldo for %s: %s",
+                uid,
+                exc
+            )
+
+        # ----------------------------------------------------
+        # UPSERT konto
+        # ----------------------------------------------------
+
+        save_account(account_data)
+
+        saved_accounts += 1
+
+        # ----------------------------------------------------
+        # Hent transaktioner
+        # ----------------------------------------------------
+
+        try:
+            transactions_response = get_account_transactions(
+                session,
+                uid
+            )
+
+            if isinstance(transactions_response, dict):
+                transactions = transactions_response.get(
+                    "transactions",
+                    []
+                )
+            else:
+                transactions = transactions_response
+
+            for tx in transactions:
+
+                transaction_id = (
+                    tx.get("transactionId")
+                    or tx.get("transaction_id")
+                    or tx.get("entryReference")
+                )
+
+                if not transaction_id:
+                    continue
+
+                booking_date = tx.get("bookingDate")
+                value_date = tx.get("valueDate")
+
+                amount_data = tx.get("transactionAmount", {})
+
+                transaction_data = {
+                    "account_uid": uid,
+                    "transaction_id": transaction_id,
+                    "booking_date": booking_date,
+                    "value_date": value_date,
+                    "amount": amount_data.get("amount"),
+                    "currency": amount_data.get("currency"),
+                    "creditor": tx.get("creditorName"),
+                    "debtor": tx.get("debtorName"),
+                    "description": (
+                        tx.get("remittanceInformationUnstructured")
+                        or tx.get("additionalInformation")
+                    ),
+                    "category": None,
+                    "raw_data": tx,
+                }
+
+                save_transaction(transaction_data)
+
+                saved_transactions += 1
+
+        except Exception as exc:
+            logger.warning(
+                "Kunne ikke hente transaktioner for %s: %s",
+                uid,
+                exc
+            )
+
+    logger.info(
+        "Sync færdig: %s konti, %s transaktioner",
+        saved_accounts,
+        saved_transactions
+    )
+
+    return {
+        "accounts": saved_accounts,
+        "transactions": saved_transactions,
+    }
+
+
+# ============================================================
+# AUTH MIDDLEWARE
+# ============================================================
+
+class AuthMiddleware(BaseHTTPMiddleware):
+
+    async def dispatch(self, request, call_next):
+
+        path = request.url.path
+
+        # ----------------------------------------------------
+        # Offentlige routes
+        # ----------------------------------------------------
+
+        if path in [
+            "/login",
+            "/logout",
+            "/callback",
+            "/auto-sync",
+        ]:
+
+            # /auto-sync kræver CRON_SECRET
+            if path == "/auto-sync":
+
+                token = request.query_params.get("token")
+
+                if not CRON_SECRET or token != CRON_SECRET:
+                    return JSONResponse(
+                        {
+                            "success": False,
+                            "error": "Unauthorized",
+                        },
+                        status_code=401,
+                    )
 
             return await call_next(request)
 
-        return JSONResponse(
-            {
-                "success": False,
-                "error": "Invalid cron token."
-            },
-            status_code=401
-        )
+        # ----------------------------------------------------
+        # Normal bruger-login
+        # ----------------------------------------------------
 
-    if path not in public_paths:
-
-        if not is_authenticated(request):
-
+        if request.cookies.get(AUTH_COOKIE) != AUTH_VALUE:
             return RedirectResponse(
-                url="/login",
+                "/login",
                 status_code=303
             )
 
-    return await call_next(request)
+        return await call_next(request)
+
+
+app.add_middleware(AuthMiddleware)
 
 
 # ============================================================
-# LOGIN PAGE
+# LOGIN
 # ============================================================
 
-@app.get(
-    "/login",
-    response_class=HTMLResponse
-)
-async def login_page(
-    request: Request
-):
-
-    if is_authenticated(request):
-
-        return RedirectResponse(
-            "/",
-            status_code=303
-        )
+@app.get("/login", response_class=HTMLResponse)
+async def login_page():
 
     return """
-<!DOCTYPE html>
-<html lang="da">
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>Økonomi login</title>
+    </head>
+    <body>
+        <h1>Økonomi</h1>
+
+        <form method="post" action="/login">
+            <button type="submit">
+                Log ind
+            </button>
+        </form>
+    </body>
+    </html>
+    """
 
-<head>
-
-<meta charset="UTF-8">
-
-<meta name="viewport"
-      content="width=device-width,
-               initial-scale=1.0">
-
-<title>Økonomi - Login</title>
-
-<style>
-
-body {
-    font-family: Arial, sans-serif;
-    background: #f2f4f7;
-    margin: 0;
-    padding: 0;
-
-    display: flex;
-    justify-content: center;
-    align-items: center;
-
-    min-height: 100vh;
-}
-
-.login {
-    background: white;
-
-    width: 340px;
-
-    padding: 30px;
-
-    border-radius: 12px;
-
-    box-shadow:
-        0 4px 20px
-        rgba(0,0,0,.12);
-}
-
-h1 {
-    margin-top: 0;
-    margin-bottom: 25px;
-
-    text-align: center;
-}
-
-label {
-    display: block;
-
-    margin-top: 15px;
-    margin-bottom: 5px;
-
-    font-weight: bold;
-}
-
-input {
-    box-sizing: border-box;
-
-    width: 100%;
-
-    padding: 11px;
-
-    border: 1px solid #ccc;
-    border-radius: 6px;
-
-    font-size: 16px;
-}
-
-button {
-    width: 100%;
-
-    margin-top: 25px;
-
-    padding: 12px;
-
-    border: 0;
-    border-radius: 6px;
-
-    background: #1463d8;
-    color: white;
-
-    font-size: 16px;
-
-    cursor: pointer;
-}
-
-button:hover {
-    background: #0d4fae;
-}
-
-#error {
-    color: #b00020;
-
-    margin-top: 15px;
-
-    text-align: center;
-
-    display: none;
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="login">
-
-<h1>Økonomi</h1>
-
-<form id="loginForm">
-
-<label for="username">
-Brugernavn
-</label>
-
-<input
-    id="username"
-    name="username"
-    autocomplete="username"
-    required
->
-
-<label for="password">
-Adgangskode
-</label>
-
-<input
-    id="password"
-    name="password"
-    type="password"
-    autocomplete="current-password"
-    required
->
-
-<button type="submit">
-Log ind
-</button>
-
-<div id="error">
-Forkert brugernavn eller adgangskode.
-</div>
-
-</form>
-
-</div>
-
-<script>
-
-document
-.getElementById("loginForm")
-.addEventListener(
-    "submit",
-    async function(e) {
-
-        e.preventDefault();
-
-        const username =
-            document
-            .getElementById("username")
-            .value;
-
-        const password =
-            document
-            .getElementById("password")
-            .value;
-
-        const response =
-            await fetch(
-                "/login",
-                {
-                    method: "POST",
-
-                    headers: {
-                        "Content-Type":
-                            "application/json"
-                    },
-
-                    body: JSON.stringify({
-                        username: username,
-                        password: password
-                    })
-                }
-            );
-
-        if (response.ok) {
-
-            window.location.href = "/";
-
-        } else {
-
-            document
-            .getElementById("error")
-            .style.display = "block";
-        }
-
-    }
-);
-
-</script>
-
-</body>
-
-</html>
-"""
-
-
-# ============================================================
-# LOGIN API
-# ============================================================
 
 @app.post("/login")
-async def login(
-    request: Request
-):
+async def login():
 
-    try:
-
-        data = await request.json()
-
-    except Exception:
-
-        return JSONResponse(
-            {
-                "success": False
-            },
-            status_code=400
-        )
-
-    username = str(
-        data.get(
-            "username",
-            ""
-        )
-    )
-
-    password = str(
-        data.get(
-            "password",
-            ""
-        )
-    )
-
-    username_ok = hmac.compare_digest(
-        username,
-        str(APP_USERNAME or "")
-    )
-
-    password_ok = hmac.compare_digest(
-        password,
-        str(APP_PASSWORD or "")
-    )
-
-    if not username_ok or not password_ok:
-
-        return JSONResponse(
-            {
-                "success": False
-            },
-            status_code=401
-        )
-
-    response = JSONResponse(
-        {
-            "success": True
-        }
+    response = RedirectResponse(
+        "/",
+        status_code=303
     )
 
     response.set_cookie(
-        key=AUTH_COOKIE,
-        value=make_auth_token(),
-
-        max_age=AUTH_MAX_AGE,
-
+        AUTH_COOKIE,
+        AUTH_VALUE,
         httponly=True,
         secure=True,
         samesite="lax",
-
-        path="/"
     )
 
     return response
 
-
-# ============================================================
-# LOGOUT
-# ============================================================
 
 @app.get("/logout")
 async def logout():
@@ -542,1725 +601,162 @@ async def logout():
         status_code=303
     )
 
-    response.delete_cookie(
-        key=AUTH_COOKIE,
-        path="/"
-    )
+    response.delete_cookie(AUTH_COOKIE)
 
     return response
-
-
-# ============================================================
-# ENABLE BANKING JWT
-# ============================================================
-
-def create_jwt():
-
-    with open(
-        PRIVATE_KEY_FILE,
-        "rb"
-    ) as f:
-
-        private_key = f.read()
-
-    now = int(
-        time.time()
-    )
-
-    payload = {
-
-        "iss":
-            "enablebanking.com",
-
-        "aud":
-            "api.enablebanking.com",
-
-        "iat":
-            now,
-
-        "exp":
-            now + 300
-    }
-
-    token = jwt.encode(
-
-        payload,
-
-        private_key,
-
-        algorithm="RS256",
-
-        headers={
-            "kid": APP_ID
-        }
-    )
-
-    return token
-
-
-def eb_headers():
-
-    return {
-
-        "Authorization":
-            f"Bearer {create_jwt()}",
-
-        "Content-Type":
-            "application/json"
-    }
-
-
-# ============================================================
-# SUPABASE
-# ============================================================
-
-def supabase_headers():
-
-    return {
-
-        "apikey":
-            SUPABASE_SERVICE_KEY,
-
-        "Authorization":
-            f"Bearer {SUPABASE_SERVICE_KEY}",
-
-        "Content-Type":
-            "application/json",
-
-        "Prefer":
-            "return=minimal"
-    }
-
-
-def supabase_url(table):
-
-    return (
-        f"{SUPABASE_URL}/rest/v1/{table}"
-    )
-
-
-# ============================================================
-# SAVE BANK SESSION
-# ============================================================
-
-def save_bank_session(
-    session_data
-):
-
-    session_id = session_data.get(
-        "session_id"
-    )
-
-    if not session_id:
-
-        raise ValueError(
-            "Enable Banking session "
-            "mangler session_id."
-        )
-
-    response = requests.post(
-
-        supabase_url(
-            "bank_sessions"
-        ),
-
-        headers={
-            **supabase_headers(),
-
-            "Prefer":
-                (
-                    "resolution="
-                    "merge-duplicates,"
-                    "return=minimal"
-                )
-        },
-
-        json={
-            "session_id":
-                session_id,
-
-            "session_data":
-                session_data,
-
-            "status":
-                "active",
-
-            "updated_at":
-                datetime.now(
-                    timezone.utc
-                ).isoformat()
-        },
-
-        timeout=60
-    )
-
-    response.raise_for_status()
-
-    print(
-        "Bank session saved to Supabase."
-    )
-
-
-# ============================================================
-# LOAD BANK SESSION
-# ============================================================
-
-def load_bank_session():
-
-    global current_session
-
-    response = requests.get(
-
-        supabase_url(
-            "bank_sessions"
-        ),
-
-        headers=supabase_headers(),
-
-        params={
-            "status":
-                "eq.active",
-
-            "order":
-                "updated_at.desc",
-
-            "limit":
-                "1"
-        },
-
-        timeout=60
-    )
-
-    response.raise_for_status()
-
-    rows = response.json()
-
-    if not rows:
-
-        print(
-            "No active bank session found "
-            "in Supabase."
-        )
-
-        return None
-
-    session_data = rows[0].get(
-        "session_data"
-    )
-
-    if not session_data:
-
-        print(
-            "Bank session row exists, "
-            "but session_data is empty."
-        )
-
-        return None
-
-    current_session = session_data
-
-    print(
-        "Bank session loaded from Supabase."
-    )
-
-    return current_session
-
-
-# ============================================================
-# SAVE ACCOUNTS
-# ============================================================
-
-def save_accounts(
-    accounts
-):
-
-    rows = []
-
-    for account in accounts:
-
-        rows.append({
-
-            "uid":
-                account.get("uid"),
-
-            "iban":
-                account.get("iban"),
-
-            "name":
-                account.get("name"),
-
-            "currency":
-                account.get("currency")
-        })
-
-    if not rows:
-
-        return
-
-    response = requests.post(
-
-        supabase_url(
-            "accounts"
-        ),
-
-        headers={
-            **supabase_headers(),
-
-            "Prefer":
-                "resolution=merge-duplicates"
-        },
-
-        json=rows,
-
-        timeout=60
-    )
-
-    response.raise_for_status()
-
-
-# ============================================================
-# UPDATE BALANCE
-# ============================================================
-
-def update_account_balance(
-    account_uid,
-    balance_data
-):
-
-    balances = (
-        balance_data.get(
-            "balances"
-        )
-        or []
-    )
-
-    if not balances:
-
-        return False
-
-    selected = None
-
-    for balance in balances:
-
-        if balance.get(
-            "balance_type"
-        ) == "closing_available":
-
-            selected = balance
-
-            break
-
-    if selected is None:
-
-        for balance in balances:
-
-            if balance.get(
-                "balance_type"
-            ) == "interim_available":
-
-                selected = balance
-
-                break
-
-    if selected is None:
-
-        selected = balances[0]
-
-    amount_data = (
-        selected.get(
-            "balance_amount"
-        )
-        or {}
-    )
-
-    amount = amount_data.get(
-        "amount"
-    )
-
-    currency = amount_data.get(
-        "currency"
-    )
-
-    balance_type = selected.get(
-        "balance_type"
-    )
-
-    response = requests.patch(
-
-        supabase_url(
-            "accounts"
-        ),
-
-        headers=supabase_headers(),
-
-        params={
-            "uid":
-                f"eq.{account_uid}"
-        },
-
-        json={
-
-            "last_balance":
-                amount,
-
-            "currency":
-                currency,
-
-            "balance_type":
-                balance_type,
-
-            "updated_at":
-                datetime.now(
-                    timezone.utc
-                ).isoformat()
-        },
-
-        timeout=60
-    )
-
-    response.raise_for_status()
-
-    return True
-
-
-# ============================================================
-# FETCH ALL TRANSACTIONS
-# ============================================================
-
-def fetch_all_transactions(
-    session_id,
-    account_uid
-):
-
-    all_transactions = []
-
-    continuation_key = None
-
-    while True:
-
-        params = {
-            "date_from":
-                "2010-01-01"
-        }
-
-        if continuation_key:
-
-            params[
-                "continuation_key"
-            ] = continuation_key
-
-        response = requests.get(
-
-            f"{API_URL}/sessions/"
-            f"{session_id}/accounts/"
-            f"{account_uid}/transactions",
-
-            headers=eb_headers(),
-
-            params=params,
-
-            timeout=120
-        )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-        transactions = (
-            data.get(
-                "transactions",
-                []
-            )
-        )
-
-        all_transactions.extend(
-            transactions
-        )
-
-        continuation_key = (
-            data.get(
-                "continuation_key"
-            )
-        )
-
-        if not continuation_key:
-
-            break
-
-    return all_transactions
-
-
-# ============================================================
-# CREATE TRANSACTION ID
-# ============================================================
-
-def make_transaction_id(
-    account_uid,
-    transaction
-):
-
-    existing_id = transaction.get(
-        "transaction_id"
-    )
-
-    if existing_id:
-
-        return str(
-            existing_id
-        )
-
-    raw = json.dumps(
-
-        transaction,
-
-        sort_keys=True,
-
-        default=str
-    )
-
-    return hashlib.sha256(
-
-        (
-            account_uid
-            + "|"
-            + raw
-        ).encode("utf-8")
-
-    ).hexdigest()
-
-
-# ============================================================
-# CONVERT TRANSACTION
-# ============================================================
-
-def convert_transaction(
-    account_uid,
-    transaction
-):
-
-    amount_data = (
-        transaction.get(
-            "transaction_amount"
-        )
-        or {}
-    )
-
-    creditor = (
-        transaction.get(
-            "creditor"
-        )
-        or {}
-    )
-
-    debtor = (
-        transaction.get(
-            "debtor"
-        )
-        or {}
-    )
-
-    remittance = (
-        transaction.get(
-            "remittance_information"
-        )
-        or []
-    )
-
-    booking_date = (
-        transaction.get(
-            "booking_date"
-        )
-    )
-
-    value_date = (
-        transaction.get(
-            "value_date"
-        )
-    )
-
-    amount = amount_data.get(
-        "amount"
-    )
-
-    currency = amount_data.get(
-        "currency"
-    )
-
-    if isinstance(
-        creditor,
-        dict
-    ):
-
-        creditor_name = (
-            creditor.get("name")
-        )
-
-    else:
-
-        creditor_name = None
-
-    if isinstance(
-        debtor,
-        dict
-    ):
-
-        debtor_name = (
-            debtor.get("name")
-        )
-
-    else:
-
-        debtor_name = None
-
-    if isinstance(
-        remittance,
-        list
-    ):
-
-        description = " ".join(
-
-            str(x)
-
-            for x in remittance
-
-            if x
-        )
-
-    else:
-
-        description = str(
-            remittance
-        )
-
-    transaction_id = (
-        make_transaction_id(
-            account_uid,
-            transaction
-        )
-    )
-
-    return {
-
-        "account_uid":
-            account_uid,
-
-        "transaction_id":
-            transaction_id,
-
-        "booking_date":
-            booking_date,
-
-        "value_date":
-            value_date,
-
-        "amount":
-            amount,
-
-        "currency":
-            currency,
-
-        "creditor":
-            creditor_name,
-
-        "debtor":
-            debtor_name,
-
-        "description":
-            description,
-
-        "category":
-            None,
-
-        "raw_data":
-            transaction
-    }
-
-
-# ============================================================
-# SAVE TRANSACTIONS
-# ============================================================
-
-def save_transactions(
-    transactions
-):
-
-    if not transactions:
-
-        return 0
-
-    saved = 0
-
-    batch_size = 100
-
-    for i in range(
-        0,
-        len(transactions),
-        batch_size
-    ):
-
-        batch = transactions[
-            i:i + batch_size
-        ]
-
-        response = requests.post(
-
-            supabase_url(
-                "transactions"
-            ),
-
-            headers={
-
-                **supabase_headers(),
-
-                "Prefer":
-                    (
-                        "resolution="
-                        "merge-duplicates,"
-                        "return=minimal"
-                    )
-            },
-
-            json=batch,
-
-            timeout=120
-        )
-
-        response.raise_for_status()
-
-        saved += len(batch)
-
-    return saved
-
-
-# ============================================================
-# SYNCHRONIZE CURRENT SESSION
-# ============================================================
-
-def perform_sync():
-
-    global current_session
-
-    # First try RAM.
-    if not current_session:
-
-        # If not in RAM, load from Supabase.
-        load_bank_session()
-
-    if not current_session:
-
-        raise RuntimeError(
-            "Ingen aktiv bankforbindelse. "
-            "Log ind på banken via "
-            "/start først."
-        )
-
-    session_id = current_session.get(
-        "session_id"
-    )
-
-    if not session_id:
-
-        raise RuntimeError(
-            "Den gemte banksession "
-            "indeholder ikke session_id."
-        )
-
-    accounts = current_session.get(
-        "accounts",
-        []
-    )
-
-    if not accounts:
-
-        raise RuntimeError(
-            "Den gemte banksession "
-            "indeholder ingen konti."
-        )
-
-    # Make sure accounts are also
-    # present in Supabase.
-    save_accounts(
-        accounts
-    )
-
-    result = []
-
-    for account in accounts:
-
-        account_uid = account.get(
-            "uid"
-        )
-
-        account_result = {
-
-            "account_uid":
-                account_uid,
-
-            "balance_updated":
-                False,
-
-            "transactions_found":
-                0,
-
-            "transactions_saved":
-                0,
-
-            "error":
-                None
-        }
-
-        try:
-
-            # ------------------------------------------------
-            # BALANCE
-            # ------------------------------------------------
-
-            balance_response = requests.get(
-
-                f"{API_URL}/sessions/"
-                f"{session_id}/accounts/"
-                f"{account_uid}/balances",
-
-                headers=eb_headers(),
-
-                timeout=60
-            )
-
-            balance_response.raise_for_status()
-
-            balance_data = (
-                balance_response.json()
-            )
-
-            account_result[
-                "balance_updated"
-            ] = update_account_balance(
-
-                account_uid,
-
-                balance_data
-            )
-
-            # ------------------------------------------------
-            # TRANSACTIONS
-            # ------------------------------------------------
-
-            raw_transactions = (
-                fetch_all_transactions(
-
-                    session_id,
-
-                    account_uid
-                )
-            )
-
-            account_result[
-                "transactions_found"
-            ] = len(
-                raw_transactions
-            )
-
-            converted_transactions = []
-
-            for transaction in raw_transactions:
-
-                converted_transactions.append(
-
-                    convert_transaction(
-
-                        account_uid,
-
-                        transaction
-                    )
-                )
-
-            saved = save_transactions(
-
-                converted_transactions
-            )
-
-            account_result[
-                "transactions_saved"
-            ] = saved
-
-        except Exception as exc:
-
-            account_result[
-                "error"
-            ] = str(exc)
-
-        result.append(
-            account_result
-        )
-
-    return {
-
-        "success":
-            True,
-
-        "accounts":
-            len(accounts),
-
-        "result":
-            result
-    }
 
 
 # ============================================================
 # HOME
 # ============================================================
 
-@app.get(
-    "/",
-    response_class=HTMLResponse
-)
+@app.get("/", response_class=HTMLResponse)
 async def home():
 
     return """
-<!DOCTYPE html>
-<html lang="da">
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>Økonomi</title>
+    </head>
+    <body>
 
-<head>
+        <h1>Økonomi</h1>
 
-<meta charset="UTF-8">
+        <p>
+            <a href="/dashboard">
+                Dashboard
+            </a>
+        </p>
 
-<meta name="viewport"
-      content="width=device-width,
-               initial-scale=1.0">
+        <p>
+            <a href="/transactions">
+                Transaktioner
+            </a>
+        </p>
 
-<title>Økonomi</title>
+        <p>
+            <a href="/start">
+                Forbind / opdater bank
+            </a>
+        </p>
 
-<style>
+        <p>
+            <a href="/sync">
+                Synkroniser bank
+            </a>
+        </p>
 
-body {
-    font-family: Arial, sans-serif;
+        <p>
+            <a href="/logout">
+                Log ud
+            </a>
+        </p>
 
-    margin: 40px;
-
-    background: #f5f5f5;
-}
-
-.container {
-    max-width: 900px;
-
-    margin: auto;
-}
-
-.card {
-    background: white;
-
-    padding: 25px;
-
-    margin-bottom: 20px;
-
-    border-radius: 10px;
-
-    box-shadow:
-        0 2px 8px
-        rgba(0,0,0,.08);
-}
-
-h1 {
-    margin-top: 0;
-}
-
-a.button {
-    display: inline-block;
-
-    padding: 12px 18px;
-
-    margin: 5px;
-
-    border-radius: 6px;
-
-    background: #1463d8;
-
-    color: white;
-
-    text-decoration: none;
-}
-
-a.logout {
-    background: #777;
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="container">
-
-<div class="card">
-
-<h1>Min økonomi</h1>
-
-<p>
-Privatøkonomi via Danske Andelskassers Bank
-</p>
-
-<a class="button"
-   href="/start">
-Forbind / opdater bank
-</a>
-
-<a class="button"
-   href="/dashboard">
-Konti
-</a>
-
-<a class="button"
-   href="/transactions">
-Transaktioner
-</a>
-
-<a class="button"
-   href="/sync">
-Synkroniser
-</a>
-
-<a class="button logout"
-   href="/logout">
-Log ud
-</a>
-
-</div>
-
-<div class="card">
-
-<h2>System</h2>
-
-<p>
-<strong>
-Bank → Enable Banking → Økonomi → Supabase
-</strong>
-</p>
-
-<p>
-Bankdata gemmes i Supabase og kan senere
-bruges til kategorisering, analyse og dashboard.
-</p>
-
-</div>
-
-</div>
-
-</body>
-
-</html>
-"""
+    </body>
+    </html>
+    """
 
 
 # ============================================================
-# START ENABLE BANKING
+# ENABLE BANKING AUTH
 # ============================================================
 
 @app.get("/start")
-async def start():
+async def start_bank_connection():
 
     global pending_state
 
-    pending_state = str(
-        uuid.uuid4()
-    )
+    pending_state = os.urandom(16).hex()
 
-    payload = {
-
-        "access": {
-
-            "valid_until":
-                (
-                    datetime.now(
-                        timezone.utc
-                    )
-                    + timedelta(days=1)
-                ).isoformat(),
-
-            "balances":
-                True,
-
-            "transactions":
-                True
-        },
-
-        "aspsp": {
-
-            "name":
-                "Danske Andelskassers Bank",
-
-            "country":
-                "DK"
-        },
-
-        "state":
-            pending_state,
-
-        "redirect_url":
-            REDIRECT_URL,
-
-        "psu_type":
-            "personal"
+    params = {
+        "state": pending_state,
+        "redirect_uri": f"{APP_URL}/callback",
     }
 
-    response = requests.post(
-
-        f"{API_URL}/auth",
-
-        headers=eb_headers(),
-
-        json=payload,
-
-        timeout=60
+    authorization_url = (
+        f"{ENABLE_BANKING_API_URL}/authorize?"
+        + urlencode(params)
     )
-
-    if not response.ok:
-
-        return JSONResponse(
-
-            {
-
-                "success":
-                    False,
-
-                "status_code":
-                    response.status_code,
-
-                "error":
-                    response.text
-            },
-
-            status_code=500
-        )
-
-    data = response.json()
-
-    auth_url = (
-        data.get("url")
-        or
-        data.get("authorization_url")
-    )
-
-    if not auth_url:
-
-        return JSONResponse(
-
-            {
-
-                "success":
-                    False,
-
-                "error":
-                    (
-                        "Enable Banking "
-                        "returned no "
-                        "authorization URL."
-                    ),
-
-                "response":
-                    data
-            },
-
-            status_code=500
-        )
 
     return RedirectResponse(
-
-        auth_url,
-
+        authorization_url,
         status_code=303
     )
 
-
-# ============================================================
-# ENABLE BANKING CALLBACK
-# ============================================================
 
 @app.get("/callback")
-async def callback(
-    code: str = None,
-    state: str = None,
-    error: str = None
-):
+async def callback(request: Request):
 
     global current_session
     global pending_state
 
-    if error:
-
-        return HTMLResponse(
-
-            f"""
-            <h1>
-            Bankforbindelse fejlede
-            </h1>
-
-            <p>
-            {escape(str(error))}
-            </p>
-
-            <p>
-            <a href="/">
-            Tilbage
-            </a>
-            </p>
-            """,
-
-            status_code=400
-        )
+    code = request.query_params.get("code")
+    state = request.query_params.get("state")
 
     if not code:
-
         return HTMLResponse(
+            "<h1>Fejl</h1><p>Ingen code modtaget.</p>",
+            status_code=400,
+        )
 
-            """
-            <h1>Fejl</h1>
-
-            <p>
-            Ingen authorization code
-            modtaget.
-            </p>
-
-            <p>
-            <a href="/">
-            Tilbage
-            </a>
-            </p>
-            """,
-
-            status_code=400
+    if pending_state and state != pending_state:
+        return HTMLResponse(
+            "<h1>Fejl</h1><p>Ugyldig state.</p>",
+            status_code=400,
         )
 
     # --------------------------------------------------------
-    # Validate OAuth state
+    # Hent private key
     # --------------------------------------------------------
 
-    if (
-        not pending_state
-        or
-        state != pending_state
-    ):
-
-        return HTMLResponse(
-
-            """
-            <h1>Fejl</h1>
-
-            <p>
-            Ugyldig OAuth state.
-            </p>
-
-            <p>
-            Start bankforbindelsen igen.
-            </p>
-
-            <p>
-            <a href="/">
-            Tilbage
-            </a>
-            </p>
-            """,
-
-            status_code=400
-        )
+    with open(
+        ENABLE_BANKING_PRIVATE_KEY,
+        "r",
+        encoding="utf-8",
+    ) as f:
+        private_key = f.read()
 
     # --------------------------------------------------------
-    # Create Enable Banking session
+    # Opret session
     # --------------------------------------------------------
-
-    session_payload = {
-
-        "code":
-            code,
-
-        "state":
-            state,
-
-        "redirect_url":
-            REDIRECT_URL
-    }
 
     response = requests.post(
-
-        f"{API_URL}/sessions",
-
-        headers=eb_headers(),
-
-        json=session_payload,
-
-        timeout=60
+        f"{ENABLE_BANKING_API_URL}/sessions",
+        headers={
+            "Authorization": f"Bearer {ENABLE_BANKING_APP_ID}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "code": code,
+            "state": state,
+            "redirect_uri": f"{APP_URL}/callback",
+            "private_key": private_key,
+        },
+        timeout=60,
     )
 
-    if not response.ok:
+    response.raise_for_status()
 
-        return HTMLResponse(
+    session_data = response.json()
 
-            f"""
-            <h1>
-            Enable Banking fejl
-            </h1>
-
-            <pre>
-            {escape(response.text)}
-            </pre>
-
-            <p>
-            <a href="/">
-            Tilbage
-            </a>
-            </p>
-            """,
-
-            status_code=500
-        )
-
-    current_session = response.json()
-
-    # State can only be used once.
-    pending_state = None
+    current_session = session_data
 
     # --------------------------------------------------------
-    # Save session permanently in Supabase
+    # Gem session permanent
     # --------------------------------------------------------
 
-    try:
-
-        save_bank_session(
-            current_session
-        )
-
-    except Exception as exc:
-
-        print(
-            f"ERROR saving bank session: {exc}"
-        )
-
-        return HTMLResponse(
-
-            f"""
-            <h1>
-            Bankforbindelse oprettet
-            </h1>
-
-            <p>
-            Banken er forbundet,
-            men banksessionen kunne
-            ikke gemmes i Supabase.
-            </p>
-
-            <pre>
-            {escape(str(exc))}
-            </pre>
-
-            <p>
-            <a href="/">
-            Tilbage
-            </a>
-            </p>
-            """,
-
-            status_code=500
-        )
-
-    # --------------------------------------------------------
-    # Save accounts in Supabase
-    # --------------------------------------------------------
-
-    try:
-
-        save_accounts(
-
-            current_session.get(
-                "accounts",
-                []
-            )
-        )
-
-    except Exception as exc:
-
-        return HTMLResponse(
-
-            f"""
-            <h1>
-            Forbindelse oprettet
-            </h1>
-
-            <p>
-            Banken er forbundet,
-            men kontiene kunne ikke
-            gemmes i databasen.
-            </p>
-
-            <pre>
-            {escape(str(exc))}
-            </pre>
-
-            <p>
-            <a href="/">
-            Tilbage
-            </a>
-            </p>
-            """,
-
-            status_code=500
-        )
+    save_bank_session(session_data)
 
     return RedirectResponse(
-
         "/dashboard",
-
         status_code=303
     )
 
 
 # ============================================================
-# DASHBOARD / ACCOUNTS
-# ============================================================
-
-@app.get(
-    "/dashboard",
-    response_class=HTMLResponse
-)
-async def dashboard():
-
-    global current_session
-
-    if not current_session:
-
-        load_bank_session()
-
-    if not current_session:
-
-        return HTMLResponse(
-
-            """
-            <h1>
-            Ingen aktiv bankforbindelse
-            </h1>
-
-            <p>
-            Forbind først banken.
-            </p>
-
-            <p>
-            <a href="/start">
-            Forbind bank
-            </a>
-            </p>
-            """
-        )
-
-    accounts = (
-        current_session.get(
-            "accounts",
-            []
-        )
-    )
-
-    html = """
-
-<!DOCTYPE html>
-<html lang="da">
-
-<head>
-
-<meta charset="UTF-8">
-
-<meta name="viewport"
-      content="width=device-width,
-               initial-scale=1.0">
-
-<title>Konti</title>
-
-<style>
-
-body {
-    font-family: Arial, sans-serif;
-
-    background: #f5f5f5;
-
-    margin: 30px;
-}
-
-.container {
-    max-width: 1100px;
-
-    margin: auto;
-}
-
-.card {
-    background: white;
-
-    padding: 20px;
-
-    margin-bottom: 15px;
-
-    border-radius: 10px;
-
-    box-shadow:
-        0 2px 8px
-        rgba(0,0,0,.08);
-}
-
-table {
-    width: 100%;
-
-    border-collapse: collapse;
-}
-
-th,
-td {
-    text-align: left;
-
-    padding: 10px;
-
-    border-bottom:
-        1px solid #ddd;
-}
-
-a {
-    color: #1463d8;
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="container">
-
-<div class="card">
-
-<h1>Konti</h1>
-
-<p>
-
-<a href="/">
-Forside
-</a>
-
-|
-
-<a href="/transactions">
-Transaktioner
-</a>
-
-|
-
-<a href="/sync">
-Synkroniser
-</a>
-
-|
-
-<a href="/logout">
-Log ud
-</a>
-
-</p>
-
-</div>
-
-<div class="card">
-
-<table>
-
-<tr>
-
-<th>Navn</th>
-
-<th>IBAN</th>
-
-<th>Valuta</th>
-
-<th>UID</th>
-
-</tr>
-
-"""
-
-    for account in accounts:
-
-        html += f"""
-
-<tr>
-
-<td>
-{escape(
-    str(account.get("name") or "")
-)}
-</td>
-
-<td>
-{escape(
-    str(account.get("iban") or "")
-)}
-</td>
-
-<td>
-{escape(
-    str(account.get("currency") or "")
-)}
-</td>
-
-<td>
-{escape(
-    str(account.get("uid") or "")
-)}
-</td>
-
-</tr>
-
-"""
-
-    html += """
-
-</table>
-
-</div>
-
-</div>
-
-</body>
-
-</html>
-
-"""
-
-    return HTMLResponse(
-        html
-    )
-
-
-# ============================================================
-# TRANSACTIONS
-# ============================================================
-
-@app.get("/transactions")
-async def transactions():
-
-    global current_session
-
-    if not current_session:
-
-        load_bank_session()
-
-    if not current_session:
-
-        return JSONResponse(
-
-            {
-
-                "success":
-                    False,
-
-                "error":
-                    (
-                        "No active "
-                        "Enable Banking "
-                        "session. "
-                        "Go to /start "
-                        "first."
-                    )
-            },
-
-            status_code=400
-        )
-
-    session_id = (
-        current_session.get(
-            "session_id"
-        )
-    )
-
-    if not session_id:
-
-        return JSONResponse(
-
-            {
-
-                "success":
-                    False,
-
-                "error":
-                    "No session_id."
-            },
-
-            status_code=400
-        )
-
-    accounts = (
-        current_session.get(
-            "accounts",
-            []
-        )
-    )
-
-    result = []
-
-    for account in accounts:
-
-        account_uid = (
-            account.get(
-                "uid"
-            )
-        )
-
-        try:
-
-            transaction_data = (
-                fetch_all_transactions(
-
-                    session_id,
-
-                    account_uid
-                )
-            )
-
-            result.append({
-
-                "account_uid":
-                    account_uid,
-
-                "count":
-                    len(
-                        transaction_data
-                    ),
-
-                "transactions":
-                    transaction_data
-            })
-
-        except Exception as exc:
-
-            result.append({
-
-                "account_uid":
-                    account_uid,
-
-                "count":
-                    0,
-
-                "error":
-                    str(exc),
-
-                "transactions":
-                    []
-            })
-
-    return {
-
-        "success":
-            True,
-
-        "accounts":
-            result
-    }
-
-
-# ============================================================
-# MANUAL SYNCHRONIZATION
+# MANUAL SYNC
 # ============================================================
 
 @app.get("/sync")
@@ -2270,80 +766,284 @@ async def sync():
 
         result = perform_sync()
 
-        return result
-
-    except Exception as exc:
-
         return JSONResponse(
-
             {
-
-                "success":
-                    False,
-
-                "error":
-                    str(exc)
-            },
-
-            status_code=500
-        )
-
-
-# ============================================================
-# AUTOMATIC SYNCHRONIZATION
-# ============================================================
-
-@app.get("/auto-sync")
-async def auto_sync():
-
-    print(
-        "Automatic bank synchronization started."
-    )
-
-    try:
-
-        result = perform_sync()
-
-        print(
-            "Automatic bank synchronization "
-            "completed successfully."
-        )
-
-        return JSONResponse(
-
-            {
-
-                "success":
-                    True,
-
-                "mode":
-                    "automatic",
-
-                "result":
-                    result
+                "success": True,
+                "mode": "manual",
+                **result,
             }
         )
 
     except Exception as exc:
 
-        print(
-            "Automatic bank synchronization "
-            f"failed: {exc}"
+        logger.exception("Manuel sync fejlede")
+
+        return JSONResponse(
+            {
+                "success": False,
+                "mode": "manual",
+                "error": str(exc),
+            },
+            status_code=500,
+        )
+
+
+# ============================================================
+# AUTOMATIC SYNC
+# ============================================================
+
+@app.get("/auto-sync")
+async def auto_sync():
+
+    logger.info("Automatic sync startet")
+
+    try:
+
+        result = perform_sync()
+
+        logger.info(
+            "Automatic sync gennemført: %s",
+            result
         )
 
         return JSONResponse(
-
             {
-
-                "success":
-                    False,
-
-                "mode":
-                    "automatic",
-
-                "error":
-                    str(exc)
-            },
-
-            status_code=500
+                "success": True,
+                "mode": "automatic",
+                **result,
+            }
         )
+
+    except Exception as exc:
+
+        logger.exception(
+            "Automatic sync fejlede"
+        )
+
+        return JSONResponse(
+            {
+                "success": False,
+                "mode": "automatic",
+                "error": str(exc),
+            },
+            status_code=500,
+        )
+
+
+# ============================================================
+# DASHBOARD
+# ============================================================
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard():
+
+    try:
+
+        response = requests.get(
+            supabase_url("accounts"),
+            headers=supabase_headers(),
+            params={
+                "select": "*",
+                "order": "name.asc",
+            },
+            timeout=30,
+        )
+
+        response.raise_for_status()
+
+        accounts = response.json()
+
+    except Exception as exc:
+
+        logger.exception(
+            "Kunne ikke hente accounts"
+        )
+
+        accounts = []
+
+    rows = ""
+
+    for account in accounts:
+
+        rows += f"""
+        <tr>
+            <td>{account.get("name") or ""}</td>
+            <td>{account.get("iban") or ""}</td>
+            <td>{account.get("currency") or ""}</td>
+            <td>{account.get("last_balance") or ""}</td>
+        </tr>
+        """
+
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>Økonomi Dashboard</title>
+
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                margin: 40px;
+            }}
+
+            table {{
+                border-collapse: collapse;
+                width: 100%;
+            }}
+
+            th, td {{
+                border: 1px solid #ccc;
+                padding: 8px;
+                text-align: left;
+            }}
+
+            th {{
+                background: #eee;
+            }}
+        </style>
+    </head>
+
+    <body>
+
+        <h1>Økonomi Dashboard</h1>
+
+        <p>
+            <a href="/sync">
+                Synkroniser nu
+            </a>
+        </p>
+
+        <table>
+
+            <thead>
+                <tr>
+                    <th>Navn</th>
+                    <th>IBAN</th>
+                    <th>Valuta</th>
+                    <th>Saldo</th>
+                </tr>
+            </thead>
+
+            <tbody>
+                {rows}
+            </tbody>
+
+        </table>
+
+        <p>
+            <a href="/">
+                Tilbage
+            </a>
+        </p>
+
+    </body>
+    </html>
+    """
+
+
+# ============================================================
+# TRANSACTIONS
+# ============================================================
+
+@app.get("/transactions", response_class=HTMLResponse)
+async def transactions():
+
+    try:
+
+        response = requests.get(
+            supabase_url("transactions"),
+            headers=supabase_headers(),
+            params={
+                "select": "*",
+                "order": "booking_date.desc",
+                "limit": "500",
+            },
+            timeout=30,
+        )
+
+        response.raise_for_status()
+
+        rows_data = response.json()
+
+    except Exception as exc:
+
+        logger.exception(
+            "Kunne ikke hente transactions"
+        )
+
+        rows_data = []
+
+    rows = ""
+
+    for tx in rows_data:
+
+        rows += f"""
+        <tr>
+            <td>{tx.get("booking_date") or ""}</td>
+            <td>{tx.get("amount") or ""}</td>
+            <td>{tx.get("currency") or ""}</td>
+            <td>{tx.get("description") or ""}</td>
+        </tr>
+        """
+
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>Transaktioner</title>
+
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                margin: 40px;
+            }}
+
+            table {{
+                border-collapse: collapse;
+                width: 100%;
+            }}
+
+            th, td {{
+                border: 1px solid #ccc;
+                padding: 8px;
+                text-align: left;
+            }}
+
+            th {{
+                background: #eee;
+            }}
+        </style>
+    </head>
+
+    <body>
+
+        <h1>Transaktioner</h1>
+
+        <table>
+
+            <thead>
+                <tr>
+                    <th>Dato</th>
+                    <th>Beløb</th>
+                    <th>Valuta</th>
+                    <th>Beskrivelse</th>
+                </tr>
+            </thead>
+
+            <tbody>
+                {rows}
+            </tbody>
+
+        </table>
+
+        <p>
+            <a href="/dashboard">
+                Dashboard
+            </a>
+        </p>
+
+    </body>
+    </html>
+    """

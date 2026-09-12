@@ -63,7 +63,6 @@ AUTH_MAX_AGE = 7 * 24 * 60 * 60
 
 app = FastAPI()
 
-
 current_session = None
 
 pending_state = None
@@ -383,7 +382,6 @@ Forkert brugernavn eller adgangskode.
 </form>
 
 </div>
-
 
 <script>
 
@@ -813,10 +811,6 @@ def save_accounts(
 
             continue
 
-        # ----------------------------------------------------
-        # 1. Find the stable existing account by IBAN.
-        # ----------------------------------------------------
-
         lookup_iban = requests.get(
 
             supabase_url(
@@ -846,11 +840,6 @@ def save_accounts(
             lookup_iban.json()
         )
 
-        # ----------------------------------------------------
-        # 2. Check whether this new Enable Banking UID
-        #    already exists in Supabase.
-        # ----------------------------------------------------
-
         lookup_uid = requests.get(
 
             supabase_url(
@@ -879,12 +868,6 @@ def save_accounts(
         existing_by_uid = (
             lookup_uid.json()
         )
-
-        # ----------------------------------------------------
-        # 3. If the UID exists on a different row than the
-        #    correct IBAN row, delete the duplicate temporary
-        #    row first.
-        # ----------------------------------------------------
 
         if (
             existing_by_uid
@@ -921,10 +904,6 @@ def save_accounts(
                 f"Removed duplicate account row "
                 f"{duplicate_id} for UID {uid}."
             )
-
-        # ----------------------------------------------------
-        # 4. Update existing account by IBAN.
-        # ----------------------------------------------------
 
         if existing_by_iban:
 
@@ -975,10 +954,6 @@ def save_accounts(
                 f"Updated account {iban} "
                 f"with UID {uid}."
             )
-
-        # ----------------------------------------------------
-        # 5. If no account with this IBAN exists, insert it.
-        # ----------------------------------------------------
 
         else:
 
@@ -1944,6 +1919,46 @@ async def callback(
 
 
 # ============================================================
+# LOAD ACCOUNTS FROM SUPABASE
+# ============================================================
+
+def load_accounts_from_supabase():
+
+    response = requests.get(
+
+        supabase_url(
+            "accounts"
+        ),
+
+        headers=supabase_headers(),
+
+        params={
+
+            "select":
+                (
+                    "id,"
+                    "uid,"
+                    "iban,"
+                    "name,"
+                    "currency,"
+                    "last_balance,"
+                    "balance_type,"
+                    "updated_at"
+                ),
+
+            "order":
+                "id.asc"
+        },
+
+        timeout=60
+    )
+
+    response.raise_for_status()
+
+    return response.json()
+
+
+# ============================================================
 # DASHBOARD / ACCOUNTS
 # ============================================================
 
@@ -1953,35 +1968,122 @@ async def callback(
 )
 async def dashboard():
 
-    session = get_active_session()
+    try:
 
-    if not session:
+        accounts = (
+            load_accounts_from_supabase()
+        )
+
+    except Exception as exc:
 
         return HTMLResponse(
 
-            """
-            <h1>
-            Ingen aktiv bankforbindelse
-            </h1>
+            f"""
+<!DOCTYPE html>
+<html lang="da">
 
-            <p>
-            Forbind først banken.
-            </p>
+<head>
 
-            <p>
-            <a href="/start">
-            Forbind bank
-            </a>
-            </p>
-            """
+<meta charset="UTF-8">
+
+<meta name="viewport"
+      content="width=device-width,
+               initial-scale=1.0">
+
+<title>Konti</title>
+
+<style>
+
+body {{
+    font-family: Arial, sans-serif;
+    background: #f5f5f5;
+    margin: 30px;
+}}
+
+.container {{
+    max-width: 1100px;
+    margin: auto;
+}}
+
+.card {{
+    background: white;
+    padding: 20px;
+    border-radius: 10px;
+}}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="container">
+
+<div class="card">
+
+<h1>Fejl ved hentning af konti</h1>
+
+<pre>
+{escape(str(exc))}
+</pre>
+
+<p>
+<a href="/">Tilbage</a>
+</p>
+
+</div>
+
+</div>
+
+</body>
+
+</html>
+""",
+
+            status_code=500
         )
 
-    accounts = (
-        session.get(
-            "accounts",
-            []
+
+    # ========================================================
+    # CALCULATE TOTAL BALANCE
+    # ========================================================
+
+    total_balance = 0.0
+
+    for account in accounts:
+
+        balance = account.get(
+            "last_balance"
         )
+
+        if balance is not None:
+
+            try:
+
+                total_balance += float(
+                    balance
+                )
+
+            except (
+                TypeError,
+                ValueError
+            ):
+
+                pass
+
+
+    total_balance_text = (
+        f"{total_balance:,.2f}"
+        .replace(",", "X")
+        .replace(".", ",")
+        .replace("X", ".")
+        + " kr."
     )
+
+
+    # ========================================================
+    # HTML
+    # ========================================================
 
     html = """
 
@@ -2001,51 +2103,221 @@ async def dashboard():
 <style>
 
 body {
-    font-family: Arial, sans-serif;
 
-    background: #f5f5f5;
+    font-family:
+        Arial,
+        sans-serif;
 
-    margin: 30px;
+    background:
+        #f5f5f5;
+
+    margin:
+        0;
+
+    padding:
+        20px;
+
 }
 
 .container {
-    max-width: 1100px;
 
-    margin: auto;
+    max-width:
+        1100px;
+
+    margin:
+        auto;
+
 }
 
 .card {
-    background: white;
 
-    padding: 20px;
+    background:
+        white;
 
-    margin-bottom: 15px;
+    padding:
+        20px;
 
-    border-radius: 10px;
+    margin-bottom:
+        20px;
+
+    border-radius:
+        10px;
 
     box-shadow:
         0 2px 8px
         rgba(0,0,0,.08);
+
 }
 
-table {
-    width: 100%;
+h1 {
 
-    border-collapse: collapse;
+    margin-top:
+        0;
+
 }
 
-th,
-td {
-    text-align: left;
+.total-label {
 
-    padding: 10px;
+    font-size:
+        16px;
 
-    border-bottom:
+    color:
+        #666;
+
+}
+
+.total {
+
+    font-size:
+        32px;
+
+    font-weight:
+        bold;
+
+    margin-top:
+        8px;
+
+}
+
+.account-grid {
+
+    display:
+        grid;
+
+    grid-template-columns:
+        repeat(
+            auto-fit,
+            minmax(
+                300px,
+                1fr
+            )
+        );
+
+    gap:
+        15px;
+
+}
+
+.account {
+
+    background:
+        #ffffff;
+
+    border:
         1px solid #ddd;
+
+    border-radius:
+        10px;
+
+    padding:
+        18px;
+
 }
 
-a {
-    color: #1463d8;
+.account.negative {
+
+    border:
+        2px solid #c62828;
+
+    background:
+        #fff5f5;
+
+}
+
+.account-name {
+
+    font-size:
+        20px;
+
+    font-weight:
+        bold;
+
+    margin-bottom:
+        8px;
+
+}
+
+.iban {
+
+    color:
+        #555;
+
+    font-size:
+        14px;
+
+    margin-bottom:
+        12px;
+
+}
+
+.balance {
+
+    font-size:
+        25px;
+
+    font-weight:
+        bold;
+
+    margin:
+        10px 0;
+
+}
+
+.negative .balance {
+
+    color:
+        #c62828;
+
+}
+
+.currency {
+
+    color:
+        #666;
+
+    font-size:
+        14px;
+
+}
+
+.updated {
+
+    color:
+        #888;
+
+    font-size:
+        12px;
+
+    margin-top:
+        12px;
+
+}
+
+nav {
+
+    margin-bottom:
+        0;
+
+}
+
+nav a {
+
+    color:
+        #1463d8;
+
+    text-decoration:
+        none;
+
+    margin-right:
+        14px;
+
+}
+
+nav a:hover {
+
+    text-decoration:
+        underline;
+
 }
 
 </style>
@@ -2060,97 +2332,182 @@ a {
 
 <h1>Konti</h1>
 
-<p>
+<nav>
 
 <a href="/">
 Forside
 </a>
 
-|
-
 <a href="/transactions">
 Transaktioner
 </a>
-
-|
 
 <a href="/sync">
 Synkroniser
 </a>
 
-|
-
 <a href="/logout">
 Log ud
 </a>
 
-</p>
+</nav>
 
 </div>
 
 
 <div class="card">
 
-<table>
+<div class="total-label">
+Samlet saldo
+</div>
 
-<tr>
-
-<th>Navn</th>
-
-<th>IBAN</th>
-
-<th>Valuta</th>
-
-<th>UID</th>
-
-</tr>
-
+<div class="total">
 """
 
-    for account in accounts:
-
-        html += f"""
-
-<tr>
-
-<td>
-{escape(
-    str(account.get("name") or "")
-)}
-</td>
-
-<td>
-{escape(
-    str(
-        (
-            account.get("account_id")
-            or {}
-        ).get("iban")
-        or account.get("iban")
-        or ""
-    )
-)}
-</td>
-
-<td>
-{escape(
-    str(account.get("currency") or "")
-)}
-</td>
-
-<td>
-{escape(
-    str(account.get("uid") or "")
-)}
-</td>
-
-</tr>
-
-"""
+    html += total_balance_text
 
     html += """
 
-</table>
+</div>
+
+</div>
+
+
+<div class="account-grid">
+
+"""
+
+
+    # ========================================================
+    # ACCOUNT CARDS
+    # ========================================================
+
+    for account in accounts:
+
+        name = str(
+            account.get("name")
+            or "Ukendt konto"
+        )
+
+        iban = str(
+            account.get("iban")
+            or ""
+        )
+
+        currency = str(
+            account.get("currency")
+            or ""
+        )
+
+        balance = account.get(
+            "last_balance"
+        )
+
+        updated_at = str(
+            account.get("updated_at")
+            or ""
+        )
+
+
+        try:
+
+            balance_number = float(
+                balance
+            )
+
+            balance_text = (
+                f"{balance_number:,.2f}"
+                .replace(",", "X")
+                .replace(".", ",")
+                .replace("X", ".")
+                + f" {currency}"
+            )
+
+            negative_class = (
+                " negative"
+                if balance_number < 0
+                else ""
+            )
+
+        except (
+            TypeError,
+            ValueError
+        ):
+
+            balance_text = (
+                "Ingen saldo"
+            )
+
+            negative_class = ""
+
+
+        # Format timestamp for display
+
+        display_updated = updated_at
+
+        try:
+
+            parsed_datetime = datetime.fromisoformat(
+                updated_at.replace(
+                    "Z",
+                    "+00:00"
+                )
+            )
+
+            display_updated = (
+                parsed_datetime
+                .astimezone()
+                .strftime(
+                    "%d-%m-%Y %H:%M"
+                )
+            )
+
+        except Exception:
+
+            pass
+
+
+        html += f"""
+
+<div class="account{negative_class}">
+
+<div class="account-name">
+
+{escape(name)}
+
+</div>
+
+<div class="iban">
+
+{escape(iban)}
+
+</div>
+
+<div class="balance">
+
+{escape(balance_text)}
+
+</div>
+
+<div class="currency">
+
+Valuta: {escape(currency)}
+
+</div>
+
+<div class="updated">
+
+Senest opdateret:
+{escape(display_updated)}
+
+</div>
+
+</div>
+
+"""
+
+
+    html += """
 
 </div>
 
@@ -2327,9 +2684,6 @@ def perform_sync():
     # Enable Banking can assign new UIDs when a new session
     # is created. Match the accounts by IBAN first so that
     # the existing Supabase account rows receive the new UID.
-    #
-    # This also removes the old temporary NULL-account rows
-    # created by the previous broken version.
     # --------------------------------------------------------
 
     save_accounts(accounts)

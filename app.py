@@ -1,5 +1,5 @@
-from fastapi import FastAPI
-from fastapi.responses import RedirectResponse, HTMLResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import RedirectResponse, HTMLResponse, JSONResponse
 import jwt
 import time
 import requests
@@ -7,80 +7,432 @@ import uuid
 import hashlib
 import json
 import os
+import hmac
 from datetime import datetime, timedelta, timezone
 from html import escape
 
-app = FastAPI()
+
+# ============================================================
+# CONFIG
+# ============================================================
 
 APP_ID = "a2a55118-0acc-4c22-a836-ea8f6f600983"
+
 PRIVATE_KEY_FILE = "/etc/secrets/enable_banking_private_key.pem"
+
 REDIRECT_URL = "https://oekonomi.onrender.com/callback"
+
 API_URL = "https://api.enablebanking.com"
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_URL = os.getenv(
+    "SUPABASE_URL",
+    "https://wwjiroaezgwtbcxteuiz.supabase.co"
+)
+
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
+APP_USERNAME = os.getenv("APP_USERNAME")
+APP_PASSWORD = os.getenv("APP_PASSWORD")
+
+
+# ============================================================
+# AUTH CONFIG
+# ============================================================
+
+AUTH_COOKIE = "oekonomi_auth"
+AUTH_MAX_AGE = 7 * 24 * 60 * 60  # 7 dage
+
+
+# ============================================================
+# APP
+# ============================================================
+
+app = FastAPI()
+
 current_session = None
+pending_state = None
 
 
-# =========================================================
+# ============================================================
+# BASIC VALIDATION
+# ============================================================
+
+if not APP_USERNAME or not APP_PASSWORD:
+    print("WARNING: APP_USERNAME or APP_PASSWORD is not configured.")
+
+if not SUPABASE_SERVICE_KEY:
+    print("WARNING: SUPABASE_SERVICE_KEY is not configured.")
+
+
+# ============================================================
+# AUTHENTICATION
+# ============================================================
+
+def make_auth_token():
+    """
+    Creates a signed authentication token.
+
+    Format:
+        timestamp.signature
+    """
+
+    timestamp = str(int(time.time()))
+
+    signature = hmac.new(
+        APP_PASSWORD.encode("utf-8"),
+        timestamp.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+
+    return f"{timestamp}.{signature}"
+
+
+def valid_auth_token(token):
+    """
+    Validates authentication cookie.
+    """
+
+    if not token or not APP_PASSWORD:
+        return False
+
+    try:
+        timestamp_text, signature = token.split(".", 1)
+
+        timestamp = int(timestamp_text)
+
+        # Token must not be older than AUTH_MAX_AGE
+        if time.time() - timestamp > AUTH_MAX_AGE:
+            return False
+
+        if timestamp > time.time() + 60:
+            return False
+
+        expected_signature = hmac.new(
+            APP_PASSWORD.encode("utf-8"),
+            timestamp_text.encode("utf-8"),
+            hashlib.sha256
+        ).hexdigest()
+
+        return hmac.compare_digest(
+            signature,
+            expected_signature
+        )
+
+    except Exception:
+        return False
+
+
+def is_authenticated(request: Request):
+    token = request.cookies.get(AUTH_COOKIE)
+    return valid_auth_token(token)
+
+
+# ============================================================
+# AUTH MIDDLEWARE
+# ============================================================
+
+@app.middleware("http")
+async def authentication_middleware(request: Request, call_next):
+
+    path = request.url.path
+
+    # These endpoints must remain accessible without authentication.
+    public_paths = {
+        "/login",
+        "/logout",
+    }
+
+    if path not in public_paths:
+
+        if not is_authenticated(request):
+
+            # Browser request -> login page
+            return RedirectResponse(
+                url="/login",
+                status_code=303
+            )
+
+    return await call_next(request)
+
+
+# ============================================================
+# LOGIN
+# ============================================================
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request):
+
+    if is_authenticated(request):
+        return RedirectResponse("/", status_code=303)
+
+    return """
+<!DOCTYPE html>
+<html lang="da">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Økonomi – Login</title>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #f2f4f7;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        .login {
+            background: white;
+            width: 340px;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,.12);
+        }
+
+        h1 {
+            margin-top: 0;
+            margin-bottom: 25px;
+            text-align: center;
+        }
+
+        label {
+            display: block;
+            margin-top: 15px;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+
+        input {
+            box-sizing: border-box;
+            width: 100%;
+            padding: 11px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-size: 16px;
+        }
+
+        button {
+            width: 100%;
+            margin-top: 25px;
+            padding: 12px;
+            border: 0;
+            border-radius: 6px;
+            background: #1463d8;
+            color: white;
+            font-size: 16px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #0d4fae;
+        }
+
+        #error {
+            color: #b00020;
+            margin-top: 15px;
+            text-align: center;
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="login">
+
+    <h1>Økonomi</h1>
+
+    <form id="loginForm">
+
+        <label for="username">Brugernavn</label>
+        <input
+            id="username"
+            name="username"
+            autocomplete="username"
+            required
+        >
+
+        <label for="password">Adgangskode</label>
+        <input
+            id="password"
+            name="password"
+            type="password"
+            autocomplete="current-password"
+            required
+        >
+
+        <button type="submit">
+            Log ind
+        </button>
+
+        <div id="error">
+            Forkert brugernavn eller adgangskode.
+        </div>
+
+    </form>
+
+</div>
+
+<script>
+
+document.getElementById("loginForm").addEventListener("submit", async function(e) {
+
+    e.preventDefault();
+
+    const username = document.getElementById("username").value;
+    const password = document.getElementById("password").value;
+
+    const response = await fetch("/login", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            username: username,
+            password: password
+        })
+    });
+
+    if (response.ok) {
+        window.location.href = "/";
+    } else {
+        document.getElementById("error").style.display = "block";
+    }
+});
+
+</script>
+
+</body>
+</html>
+"""
+
+
+@app.post("/login")
+async def login(request: Request):
+
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse(
+            {"success": False},
+            status_code=400
+        )
+
+    username = data.get("username", "")
+    password = data.get("password", "")
+
+    username_ok = hmac.compare_digest(
+        str(username),
+        str(APP_USERNAME or "")
+    )
+
+    password_ok = hmac.compare_digest(
+        str(password),
+        str(APP_PASSWORD or "")
+    )
+
+    if not username_ok or not password_ok:
+
+        return JSONResponse(
+            {"success": False},
+            status_code=401
+        )
+
+    response = JSONResponse({
+        "success": True
+    })
+
+    response.set_cookie(
+        key=AUTH_COOKIE,
+        value=make_auth_token(),
+        max_age=AUTH_MAX_AGE,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/"
+    )
+
+    return response
+
+
+@app.get("/logout")
+async def logout():
+
+    response = RedirectResponse(
+        url="/login",
+        status_code=303
+    )
+
+    response.delete_cookie(
+        key=AUTH_COOKIE,
+        path="/"
+    )
+
+    return response
+
+
+# ============================================================
 # ENABLE BANKING
-# =========================================================
+# ============================================================
 
 def create_jwt():
-    with open(PRIVATE_KEY_FILE, "r") as f:
+
+    with open(PRIVATE_KEY_FILE, "rb") as f:
         private_key = f.read()
 
     now = int(time.time())
 
     payload = {
-        "iss": "enablebanking.com",
+        "iss": APP_ID,
         "aud": "api.enablebanking.com",
         "iat": now,
-        "exp": now + 3600,
+        "exp": now + 300
     }
 
-    headers = {
-        "kid": APP_ID,
-        "typ": "JWT",
-    }
-
-    return jwt.encode(
+    token = jwt.encode(
         payload,
         private_key,
-        algorithm="RS256",
-        headers=headers,
+        algorithm="RS256"
     )
+
+    return token
 
 
 def eb_headers():
+
     return {
         "Authorization": f"Bearer {create_jwt()}",
-        "Accept": "application/json",
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
     }
 
 
-# =========================================================
+# ============================================================
 # SUPABASE
-# =========================================================
+# ============================================================
 
 def supabase_headers():
+
     return {
         "apikey": SUPABASE_SERVICE_KEY,
         "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
         "Content-Type": "application/json",
-        "Prefer": "resolution=merge-duplicates",
+        "Prefer": "return=minimal"
     }
 
 
 def supabase_url(table):
+
     return f"{SUPABASE_URL}/rest/v1/{table}"
 
 
-# =========================================================
-# GEM BANKKONTI
-# =========================================================
+# ============================================================
+# SAVE ACCOUNTS
+# ============================================================
 
 def save_accounts(accounts):
 
@@ -88,146 +440,129 @@ def save_accounts(accounts):
 
     for account in accounts:
 
-        account_id = account.get("account_id") or {}
-
         rows.append({
             "uid": account.get("uid"),
-            "iban": (
-                account_id.get("iban")
-                or account.get("iban")
-            ),
-            "name": (
-                account_id.get("name")
-                or account.get("name")
-            ),
-            "currency": (
-                account_id.get("currency")
-                or account.get("currency")
-            ),
+            "iban": account.get("iban"),
+            "name": account.get("name"),
+            "currency": account.get("currency")
         })
 
     if not rows:
         return
 
     response = requests.post(
-        supabase_url("accounts") + "?on_conflict=uid",
-        headers=supabase_headers(),
-        json=rows,
-        timeout=30,
-    )
-
-    if response.status_code not in (200, 201):
-        raise Exception(
-            f"Supabase accounts fejl "
-            f"{response.status_code}: "
-            f"{response.text}"
-        )
-
-
-# =========================================================
-# HENT OG GEM SALDO
-# =========================================================
-
-def update_account_balance(account_uid):
-
-    response = requests.get(
-        f"{API_URL}/accounts/{account_uid}/balances",
-        headers=eb_headers(),
-        timeout=30,
-    )
-
-    if response.status_code != 200:
-        return {
-            "error": True,
-            "status_code": response.status_code,
-            "response": response.text,
-        }
-
-    data = response.json()
-
-    balances = data.get("balances") or []
-
-    if not balances:
-        return {
-            "error": False,
-        }
-
-    balance = balances[0]
-
-    amount_data = balance.get("balance_amount") or {}
-
-    amount = amount_data.get("amount")
-    balance_type = balance.get("name")
-
-    payload = {
-        "last_balance": amount,
-        "balance_type": balance_type,
-        "updated_at": datetime.now(
-            timezone.utc
-        ).isoformat(),
-    }
-
-    response = requests.patch(
-        supabase_url("accounts")
-        + f"?uid=eq.{account_uid}",
+        supabase_url("accounts"),
         headers={
             **supabase_headers(),
-            "Prefer": "return=minimal",
+            "Prefer": "resolution=merge-duplicates"
         },
-        json=payload,
-        timeout=30,
+        json=rows,
+        timeout=60
     )
 
-    if response.status_code not in (200, 204):
-        return {
-            "error": True,
-            "status_code": response.status_code,
-            "response": response.text,
-        }
-
-    return {
-        "error": False,
-    }
+    response.raise_for_status()
 
 
-# =========================================================
-# HENT ALLE TRANSAKTIONER
-# =========================================================
+# ============================================================
+# UPDATE ACCOUNT BALANCE
+# ============================================================
 
-def fetch_all_transactions(account_uid):
+def update_account_balance(account_uid, balance_data):
+
+    balances = balance_data.get("balances", [])
+
+    if not balances:
+        return False
+
+    # Prefer current balance
+    selected = None
+
+    for balance in balances:
+
+        if balance.get("balance_type") == "closing_available":
+            selected = balance
+            break
+
+    if selected is None:
+
+        for balance in balances:
+
+            if balance.get("balance_type") == "interim_available":
+                selected = balance
+                break
+
+    if selected is None:
+        selected = balances[0]
+
+    amount_data = selected.get("balance_amount") or {}
+
+    amount = amount_data.get("amount")
+    currency = amount_data.get("currency")
+
+    balance_type = selected.get("balance_type")
+
+    response = requests.patch(
+        supabase_url("accounts"),
+        headers=supabase_headers(),
+        params={
+            "uid": f"eq.{account_uid}"
+        },
+        json={
+            "last_balance": amount,
+            "currency": currency,
+            "balance_type": balance_type,
+            "updated_at": datetime.now(
+                timezone.utc
+            ).isoformat()
+        },
+        timeout=60
+    )
+
+    response.raise_for_status()
+
+    return True
+
+
+# ============================================================
+# FETCH ALL TRANSACTIONS
+# ============================================================
+
+def fetch_all_transactions(
+    session_id,
+    account_uid
+):
 
     all_transactions = []
+
     continuation_key = None
 
-    params = {
-        "date_from": "2010-01-01",
-    }
-
     while True:
+
+        params = {
+            "date_from": "2010-01-01"
+        }
 
         if continuation_key:
             params["continuation_key"] = continuation_key
 
         response = requests.get(
-            f"{API_URL}/accounts/"
-            f"{account_uid}/transactions",
+            f"{API_URL}/sessions/{session_id}/accounts/{account_uid}/transactions",
             headers=eb_headers(),
             params=params,
-            timeout=60,
+            timeout=120
         )
 
-        if response.status_code != 200:
-            return {
-                "error": True,
-                "status_code": response.status_code,
-                "response": response.text,
-                "transactions": all_transactions,
-            }
+        response.raise_for_status()
 
         data = response.json()
 
+        transactions = data.get(
+            "transactions",
+            []
+        )
+
         all_transactions.extend(
-            data.get("transactions") or []
+            transactions
         )
 
         continuation_key = data.get(
@@ -237,56 +572,57 @@ def fetch_all_transactions(account_uid):
         if not continuation_key:
             break
 
-    return {
-        "error": False,
-        "transactions": all_transactions,
-    }
+    return all_transactions
 
 
-# =========================================================
-# LAV UNIKT TRANSAKTIONS-ID
-# =========================================================
+# ============================================================
+# TRANSACTION ID
+# ============================================================
 
-def make_transaction_id(account_uid, transaction):
+def make_transaction_id(
+    account_uid,
+    transaction
+):
 
-    transaction_id = (
-        transaction.get("transaction_id")
-        or transaction.get("entry_reference")
+    existing_id = transaction.get(
+        "transaction_id"
     )
 
-    if transaction_id:
-        return str(transaction_id)
+    if existing_id:
+        return str(existing_id)
 
     raw = json.dumps(
         transaction,
         sort_keys=True,
-        ensure_ascii=False,
-        default=str,
+        default=str
     )
 
     return hashlib.sha256(
-        f"{account_uid}:{raw}".encode("utf-8")
+        (
+            account_uid + "|" + raw
+        ).encode("utf-8")
     ).hexdigest()
 
 
-# =========================================================
-# KONVERTER TRANSAKTION
-# =========================================================
+# ============================================================
+# CONVERT TRANSACTION
+# ============================================================
 
-def convert_transaction(account_uid, transaction):
+def convert_transaction(
+    account_uid,
+    transaction
+):
 
     amount_data = (
         transaction.get("transaction_amount")
         or {}
     )
 
-    # Enable Banking kan returnere null her
     creditor = (
         transaction.get("creditor")
         or {}
     )
 
-    # Enable Banking kan returnere null her
     debtor = (
         transaction.get("debtor")
         or {}
@@ -297,573 +633,796 @@ def convert_transaction(account_uid, transaction):
         or []
     )
 
+    booking_date = transaction.get(
+        "booking_date"
+    )
+
+    value_date = transaction.get(
+        "value_date"
+    )
+
+    amount = amount_data.get(
+        "amount"
+    )
+
+    currency = amount_data.get(
+        "currency"
+    )
+
+    creditor_name = (
+        creditor.get("name")
+        if isinstance(creditor, dict)
+        else None
+    )
+
+    debtor_name = (
+        debtor.get("name")
+        if isinstance(debtor, dict)
+        else None
+    )
+
     if isinstance(remittance, list):
 
         description = " ".join(
             str(x)
             for x in remittance
-            if x is not None
+            if x
         )
 
     else:
 
-        description = str(remittance)
+        description = str(
+            remittance
+        )
+
+    transaction_id = make_transaction_id(
+        account_uid,
+        transaction
+    )
 
     return {
         "account_uid": account_uid,
-
-        "transaction_id": make_transaction_id(
-            account_uid,
-            transaction,
-        ),
-
-        "booking_date": transaction.get(
-            "booking_date"
-        ),
-
-        "value_date": transaction.get(
-            "value_date"
-        ),
-
-        "amount": amount_data.get(
-            "amount"
-        ),
-
-        "currency": amount_data.get(
-            "currency"
-        ),
-
-        "creditor": creditor.get(
-            "name"
-        ),
-
-        "debtor": debtor.get(
-            "name"
-        ),
-
+        "transaction_id": transaction_id,
+        "booking_date": booking_date,
+        "value_date": value_date,
+        "amount": amount,
+        "currency": currency,
+        "creditor": creditor_name,
+        "debtor": debtor_name,
         "description": description,
-
         "category": None,
-
-        "raw_data": transaction,
+        "raw_data": transaction
     }
 
 
-# =========================================================
-# GEM TRANSAKTIONER I SUPABASE
-# =========================================================
+# ============================================================
+# SAVE TRANSACTIONS
+# ============================================================
 
-def save_transactions(account_uid, transactions):
+def save_transactions(
+    transactions
+):
 
     if not transactions:
         return 0
 
-    rows = []
-
-    for transaction in transactions:
-
-        rows.append(
-            convert_transaction(
-                account_uid,
-                transaction,
-            )
-        )
-
     saved = 0
 
-    for i in range(0, len(rows), 100):
+    # Supabase works well with batches.
+    batch_size = 100
 
-        batch = rows[i:i + 100]
+    for i in range(
+        0,
+        len(transactions),
+        batch_size
+    ):
+
+        batch = transactions[
+            i:i + batch_size
+        ]
 
         response = requests.post(
-            supabase_url("transactions")
-            + "?on_conflict=account_uid,transaction_id",
-            headers=supabase_headers(),
+            supabase_url("transactions"),
+            headers={
+                **supabase_headers(),
+                "Prefer": (
+                    "resolution=merge-duplicates,"
+                    "return=minimal"
+                )
+            },
             json=batch,
-            timeout=60,
+            timeout=120
         )
 
-        if response.status_code not in (200, 201):
-            raise Exception(
-                f"Supabase transactions "
-                f"fejl {response.status_code}: "
-                f"{response.text}"
-            )
+        response.raise_for_status()
 
         saved += len(batch)
 
     return saved
 
 
-# =========================================================
-# FORSIDE
-# =========================================================
+# ============================================================
+# HOME
+# ============================================================
 
-@app.get("/")
-def home():
+@app.get("/", response_class=HTMLResponse)
+async def home():
 
-    return HTMLResponse("""
-    <h1>Privat Økonomi</h1>
+    return """
+<!DOCTYPE html>
+<html lang="da">
 
-    <p>Backend kører.</p>
+<head>
 
-    <p>
-        <a href="/start">
-            Forbind til banken
-        </a>
-    </p>
+<meta charset="UTF-8">
 
-    <p>
-        <a href="/dashboard">
-            Åbn økonomi-dashboard
-        </a>
-    </p>
+<meta name="viewport"
+      content="width=device-width, initial-scale=1.0">
 
-    <p>
-        <a href="/sync">
-            Synkroniser bankdata
-        </a>
-    </p>
-    """)
+<title>Økonomi</title>
+
+<style>
+
+body {
+    font-family: Arial, sans-serif;
+    margin: 40px;
+    background: #f5f5f5;
+}
+
+.container {
+    max-width: 900px;
+    margin: auto;
+}
+
+.card {
+    background: white;
+    padding: 25px;
+    margin-bottom: 20px;
+    border-radius: 10px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.08);
+}
+
+h1 {
+    margin-top: 0;
+}
+
+a.button,
+button {
+    display: inline-block;
+    padding: 12px 18px;
+    margin: 5px;
+    border: none;
+    border-radius: 6px;
+    background: #1463d8;
+    color: white;
+    text-decoration: none;
+    cursor: pointer;
+    font-size: 15px;
+}
+
+a.logout {
+    background: #777;
+}
+
+.warning {
+    background: #fff3cd;
+    padding: 15px;
+    border-radius: 6px;
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="container">
+
+<div class="card">
+
+<h1>Min økonomi</h1>
+
+<p>
+Privatøkonomi via Danske Andelskassers Bank
+</p>
+
+<a class="button" href="/start">
+Forbind / opdater bank
+</a>
+
+<a class="button" href="/dashboard">
+Konti
+</a>
+
+<a class="button" href="/transactions">
+Transaktioner
+</a>
+
+<a class="button" href="/sync">
+Synkroniser
+</a>
+
+<a class="button logout" href="/logout">
+Log ud
+</a>
+
+</div>
+
+<div class="card">
+
+<h2>Sådan fungerer det</h2>
+
+<p>
+<strong>Bank → Enable Banking → Økonomi → Supabase</strong>
+</p>
+
+<p>
+Bankdata gemmes i Supabase og kan senere bruges
+til kategorisering, analyse og dashboard.
+</p>
+
+</div>
+
+</div>
+
+</body>
+
+</html>
+"""
 
 
-# =========================================================
-# START BANKFORBINDELSE
-# =========================================================
+# ============================================================
+# START BANK CONNECTION
+# ============================================================
 
 @app.get("/start")
-def start():
+async def start():
 
-    state = str(uuid.uuid4())
+    global pending_state
 
-    access_valid_until = (
-        datetime.now(timezone.utc)
-        + timedelta(days=90)
-    ).isoformat().replace(
-        "+00:00",
-        "Z",
+    pending_state = str(
+        uuid.uuid4()
     )
 
-    data = {
+    payload = {
         "access": {
-            "balances": True,
-            "transactions": True,
-            "valid_until": access_valid_until,
+            "valid_until": (
+                datetime.now(timezone.utc)
+                + timedelta(days=1)
+            ).isoformat()
         },
-
         "aspsp": {
             "name": "Danske Andelskassers Bank",
-            "country": "DK",
+            "country": "DK"
         },
-
-        "state": state,
-
+        "state": pending_state,
         "redirect_url": REDIRECT_URL,
-
         "psu_type": "personal",
+        "access": {
+            "balances": True,
+            "transactions": True
+        }
     }
 
     response = requests.post(
         f"{API_URL}/auth",
         headers=eb_headers(),
-        json=data,
-        timeout=30,
+        json=payload,
+        timeout=60
     )
 
-    if response.status_code != 200:
-        return {
-            "error": "Enable Banking /auth fejlede",
-            "status_code": response.status_code,
-            "response": response.text,
-        }
+    if not response.ok:
 
-    result = response.json()
+        return JSONResponse(
+            {
+                "success": False,
+                "status_code": response.status_code,
+                "error": response.text
+            },
+            status_code=500
+        )
+
+    data = response.json()
+
+    auth_url = data.get(
+        "url"
+    ) or data.get(
+        "authorization_url"
+    )
+
+    if not auth_url:
+
+        return JSONResponse(
+            {
+                "success": False,
+                "error": (
+                    "Enable Banking returned no "
+                    "authorization URL."
+                ),
+                "response": data
+            },
+            status_code=500
+        )
 
     return RedirectResponse(
-        url=result["url"]
+        auth_url,
+        status_code=303
     )
 
 
-# =========================================================
-# CALLBACK FRA BANKEN
-# =========================================================
+# ============================================================
+# CALLBACK
+# ============================================================
 
 @app.get("/callback")
-def callback(
-    code: str | None = None,
-    state: str | None = None,
-    error: str | None = None,
-    error_description: str | None = None,
+async def callback(
+    code: str = None,
+    state: str = None,
+    error: str = None
 ):
 
     global current_session
+    global pending_state
 
     if error:
-        return {
-            "error": error,
-            "error_description": error_description,
-        }
+
+        return HTMLResponse(
+            f"""
+            <h1>Bankforbindelse fejlede</h1>
+            <p>{escape(str(error))}</p>
+            <p><a href="/">Tilbage</a></p>
+            """,
+            status_code=400
+        )
 
     if not code:
-        return {
-            "error":
-                "Der kom ingen authorization "
-                "code tilbage."
-        }
+
+        return HTMLResponse(
+            """
+            <h1>Fejl</h1>
+            <p>Ingen authorization code modtaget.</p>
+            <p><a href="/">Tilbage</a></p>
+            """,
+            status_code=400
+        )
+
+    # Validate OAuth state.
+    if not pending_state or state != pending_state:
+
+        return HTMLResponse(
+            """
+            <h1>Fejl</h1>
+            <p>Ugyldig OAuth state.</p>
+            <p>Start bankforbindelsen igen.</p>
+            <p><a href="/">Tilbage</a></p>
+            """,
+            status_code=400
+        )
+
+    session_payload = {
+        "code": code,
+        "state": state,
+        "redirect_url": REDIRECT_URL
+    }
 
     response = requests.post(
         f"{API_URL}/sessions",
         headers=eb_headers(),
-        json={
-            "code": code,
-        },
-        timeout=30,
+        json=session_payload,
+        timeout=60
     )
 
-    if response.status_code != 200:
-        return {
-            "error":
-                "Enable Banking /sessions "
-                "fejlede",
+    if not response.ok:
 
-            "status_code":
-                response.status_code,
-
-            "response":
-                response.text,
-        }
+        return HTMLResponse(
+            f"""
+            <h1>Enable Banking fejl</h1>
+            <pre>{escape(response.text)}</pre>
+            <p><a href="/">Tilbage</a></p>
+            """,
+            status_code=500
+        )
 
     current_session = response.json()
 
-    save_accounts(
-        current_session.get("accounts") or []
-    )
+    # State can only be used once.
+    pending_state = None
+
+    try:
+
+        save_accounts(
+            current_session.get(
+                "accounts",
+                []
+            )
+        )
+
+    except Exception as exc:
+
+        return HTMLResponse(
+            f"""
+            <h1>Forbindelse oprettet</h1>
+
+            <p>
+            Banken er forbundet, men kontiene
+            kunne ikke gemmes i databasen.
+            </p>
+
+            <pre>{escape(str(exc))}</pre>
+
+            <p><a href="/">Tilbage</a></p>
+            """,
+            status_code=500
+        )
 
     return RedirectResponse(
-        url="/dashboard"
+        "/dashboard",
+        status_code=303
     )
 
 
-# =========================================================
+# ============================================================
 # DASHBOARD
-# =========================================================
+# ============================================================
 
-@app.get("/dashboard")
-def dashboard():
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard():
+
+    global current_session
 
     if not current_session:
 
-        return HTMLResponse("""
-        <h1>Privat Økonomi</h1>
+        return HTMLResponse(
+            """
+            <h1>Ingen aktiv bankforbindelse</h1>
 
-        <p>
-            Der er ingen aktiv bankforbindelse.
-        </p>
+            <p>
+            Forbind først banken.
+            </p>
 
-        <p>
+            <p>
             <a href="/start">
-                Forbind til banken
+            Forbind bank
             </a>
-        </p>
-        """)
+            </p>
+            """
+        )
 
-    accounts = (
-        current_session.get("accounts")
-        or []
+    accounts = current_session.get(
+        "accounts",
+        []
     )
 
-    rows = []
+    html = """
+
+<!DOCTYPE html>
+<html lang="da">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta name="viewport"
+      content="width=device-width, initial-scale=1.0">
+
+<title>Konti</title>
+
+<style>
+
+body {
+    font-family: Arial, sans-serif;
+    background: #f5f5f5;
+    margin: 30px;
+}
+
+.container {
+    max-width: 1100px;
+    margin: auto;
+}
+
+.card {
+    background: white;
+    padding: 20px;
+    margin-bottom: 15px;
+    border-radius: 10px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.08);
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+th,
+td {
+    text-align: left;
+    padding: 10px;
+    border-bottom: 1px solid #ddd;
+}
+
+a {
+    color: #1463d8;
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="container">
+
+<div class="card">
+
+<h1>Konti</h1>
+
+<p>
+<a href="/">Forside</a> |
+<a href="/transactions">Transaktioner</a> |
+<a href="/sync">Synkroniser</a> |
+<a href="/logout">Log ud</a>
+</p>
+
+</div>
+
+<div class="card">
+
+<table>
+
+<tr>
+<th>Navn</th>
+<th>IBAN</th>
+<th>Valuta</th>
+<th>UID</th>
+</tr>
+"""
 
     for account in accounts:
 
-        uid = account.get("uid")
+        html += f"""
+<tr>
 
-        balance_response = requests.get(
-            f"{API_URL}/accounts/"
-            f"{uid}/balances",
-            headers=eb_headers(),
-            timeout=30,
-        )
+<td>
+{escape(str(account.get("name") or ""))}
+</td>
 
-        if balance_response.status_code == 200:
+<td>
+{escape(str(account.get("iban") or ""))}
+</td>
 
-            balance_data = balance_response.json()
+<td>
+{escape(str(account.get("currency") or ""))}
+</td>
 
-            balances = (
-                balance_data.get("balances")
-                or []
-            )
+<td>
+{escape(str(account.get("uid") or ""))}
+</td>
 
-            balance_parts = []
+</tr>
+"""
 
-            for balance in balances:
+    html += """
 
-                balance_amount = (
-                    balance.get("balance_amount")
-                    or {}
-                )
+</table>
 
-                balance_name = str(
-                    balance.get(
-                        "name",
-                        "Saldo",
-                    )
-                )
+</div>
 
-                balance_amount_value = str(
-                    balance_amount.get(
-                        "amount",
-                        "",
-                    )
-                )
+</div>
 
-                balance_currency = str(
-                    balance_amount.get(
-                        "currency",
-                        "",
-                    )
-                )
+</body>
 
-                balance_parts.append(
-                    f"{escape(balance_name)}: "
-                    f"{escape(balance_amount_value)} "
-                    f"{escape(balance_currency)}"
-                )
+</html>
+"""
 
-            balance_text = "<br>".join(
-                balance_parts
-            )
-
-        else:
-
-            balance_text = (
-                "Fejl ved hentning af saldo "
-                f"({balance_response.status_code})"
-            )
-
-        account_id = (
-            account.get("account_id")
-            or {}
-        )
-
-        uid_text = escape(
-            str(account.get("uid", ""))
-        )
-
-        iban_text = escape(
-            str(account_id.get("iban", ""))
-        )
-
-        rows.append(f"""
-        <tr>
-            <td>{uid_text}</td>
-            <td>{iban_text}</td>
-            <td>{balance_text}</td>
-        </tr>
-        """)
-
-    return HTMLResponse(f"""
-    <!DOCTYPE html>
-
-    <html lang="da">
-
-    <head>
-
-        <meta charset="UTF-8">
-
-        <title>Privat Økonomi</title>
-
-        <style>
-
-            body {{
-                font-family: Arial, sans-serif;
-                margin: 40px;
-            }}
-
-            table {{
-                border-collapse: collapse;
-                width: 100%;
-            }}
-
-            th, td {{
-                border: 1px solid #ccc;
-                padding: 10px;
-                text-align: left;
-            }}
-
-            th {{
-                background: #eee;
-            }}
-
-        </style>
-
-    </head>
-
-    <body>
-
-        <h1>Privat Økonomi</h1>
-
-        <h2>Bankkonti</h2>
-
-        <table>
-
-            <tr>
-                <th>Account ID</th>
-                <th>IBAN</th>
-                <th>Saldo</th>
-            </tr>
-
-            {''.join(rows)}
-
-        </table>
-
-        <p>
-            <a href="/start">
-                Opdater bankforbindelse
-            </a>
-        </p>
-
-    </body>
-
-    </html>
-    """)
+    return HTMLResponse(html)
 
 
-# =========================================================
-# TRANSAKTIONER
-# =========================================================
+# ============================================================
+# TRANSACTIONS
+# ============================================================
 
 @app.get("/transactions")
-def transactions():
+async def transactions():
+
+    global current_session
 
     if not current_session:
-        return {
-            "error":
-                "Ingen aktiv bankforbindelse. "
-                "Gå til /start først."
-        }
 
-    result = {}
-
-    for account in (
-        current_session.get("accounts")
-        or []
-    ):
-
-        uid = account.get("uid")
-
-        account_id = (
-            account.get("account_id")
-            or {}
+        return JSONResponse(
+            {
+                "success": False,
+                "error": (
+                    "No active Enable Banking session. "
+                    "Go to /start first."
+                )
+            },
+            status_code=400
         )
 
-        result[uid] = {
-            "iban": account_id.get("iban"),
+    session_id = current_session.get(
+        "session_id"
+    )
 
-            "name": account.get("name"),
+    if not session_id:
 
-            "transactions":
-                fetch_all_transactions(uid),
-        }
+        return JSONResponse(
+            {
+                "success": False,
+                "error": "No session_id."
+            },
+            status_code=400
+        )
 
-    return result
-
-
-# =========================================================
-# SYNKRONISERING TIL SUPABASE
-# =========================================================
-
-@app.get("/sync")
-def sync():
-
-    if not current_session:
-        return {
-            "error":
-                "Ingen aktiv bankforbindelse. "
-                "Gå til /start først."
-        }
-
-    accounts = (
-        current_session.get("accounts")
-        or []
+    accounts = current_session.get(
+        "accounts",
+        []
     )
 
     result = []
 
     for account in accounts:
 
-        uid = account.get("uid")
+        account_uid = account.get(
+            "uid"
+        )
 
         try:
 
-            save_accounts([account])
-
-            balance_result = (
-                update_account_balance(uid)
-            )
-
-            transaction_result = (
-                fetch_all_transactions(uid)
-            )
-
-            if transaction_result.get("error"):
-
-                result.append({
-                    "account_uid": uid,
-
-                    "balance_updated":
-                        not balance_result.get(
-                            "error",
-                            False,
-                        ),
-
-                    "transactions_saved": 0,
-
-                    "error": transaction_result,
-                })
-
-                continue
-
-            transaction_count = (
-                save_transactions(
-                    uid,
-                    transaction_result.get(
-                        "transactions"
-                    ) or [],
+            transactions_data = (
+                fetch_all_transactions(
+                    session_id,
+                    account_uid
                 )
             )
 
             result.append({
-                "account_uid": uid,
-
-                "balance_updated":
-                    not balance_result.get(
-                        "error",
-                        False,
-                    ),
-
-                "transactions_saved":
-                    transaction_count,
-
-                "error": None,
+                "account_uid": account_uid,
+                "count": len(
+                    transactions_data
+                ),
+                "transactions": transactions_data
             })
 
-        except Exception as e:
+        except Exception as exc:
 
             result.append({
-                "account_uid": uid,
-
-                "balance_updated": False,
-
-                "transactions_saved": 0,
-
-                "error": str(e),
+                "account_uid": account_uid,
+                "count": 0,
+                "error": str(exc),
+                "transactions": []
             })
 
     return {
         "success": True,
+        "accounts": result
+    }
 
+
+# ============================================================
+# SYNC
+# ============================================================
+
+@app.get("/sync")
+async def sync():
+
+    global current_session
+
+    if not current_session:
+
+        return JSONResponse(
+            {
+                "success": False,
+                "error": (
+                    "No active Enable Banking session. "
+                    "Go to /start first."
+                )
+            },
+            status_code=400
+        )
+
+    session_id = current_session.get(
+        "session_id"
+    )
+
+    if not session_id:
+
+        return JSONResponse(
+            {
+                "success": False,
+                "error": "No session_id."
+            },
+            status_code=400
+        )
+
+    accounts = current_session.get(
+        "accounts",
+        []
+    )
+
+    result = []
+
+    for account in accounts:
+
+        account_uid = account.get(
+            "uid"
+        )
+
+        account_result = {
+            "account_uid": account_uid,
+            "balance_updated": False,
+            "transactions_saved": 0,
+            "error": None
+        }
+
+        try:
+
+            # ------------------------------------------------
+            # BALANCE
+            # ------------------------------------------------
+
+            balance_response = requests.get(
+                f"{API_URL}/sessions/"
+                f"{session_id}/accounts/"
+                f"{account_uid}/balances",
+                headers=eb_headers(),
+                timeout=60
+            )
+
+            balance_response.raise_for_status()
+
+            balance_data = (
+                balance_response.json()
+            )
+
+            account_result[
+                "balance_updated"
+            ] = update_account_balance(
+                account_uid,
+                balance_data
+            )
+
+            # ------------------------------------------------
+            # TRANSACTIONS
+            # ------------------------------------------------
+
+            raw_transactions = (
+                fetch_all_transactions(
+                    session_id,
+                    account_uid
+                )
+            )
+
+            converted_transactions = []
+
+            for transaction in raw_transactions:
+
+                converted_transactions.append(
+                    convert_transaction(
+                        account_uid,
+                        transaction
+                    )
+                )
+
+            saved = save_transactions(
+                converted_transactions
+            )
+
+            account_result[
+                "transactions_saved"
+            ] = saved
+
+        except Exception as exc:
+
+            account_result[
+                "error"
+            ] = str(exc)
+
+        result.append(
+            account_result
+        )
+
+    return {
+        "success": True,
         "accounts": len(accounts),
-
-        "result": result,
+        "result": result
     }

@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vilkår for brug – Privat Økonomi</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            max-width: 800px;
+            margin: 40px auto;
+            padding: 0 20px;
+            color: #222;
+        }
+
+        h1, h2 {
+            color: #111;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+        }
+
+        .updated {
+            color: #666;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+
+<body>
+
+<h1>Vilkår for brug</h1>
+
+<p class="updated">Senest opdateret: 12. september 2026</p>
+
+<h2>1. Om applikationen</h2>
+
+<p>
+    "Privat Økonomi" er et privat økonomidashboard udviklet til personlig brug.
+    Formålet er at samle og præsentere brugerens egne økonomiske oplysninger
+    på en overskuelig måde.
+</p>
+
+<h2>2. Personlig brug</h2>
+
+<p>
+    Applikationen er beregnet til brug af ejeren af de tilknyttede økonomiske
+    konti. Applikationen er ikke en offentlig økonomisk tjeneste eller et
+    kommercielt rådgivningsprodukt.
+</p>
+
+<h2>3. Bankdata</h2>
+
+<p>
+    Hvis brugeren vælger at forbinde en bankkonto, kan applikationen hente
+    konto- og transaktionsoplysninger gennem en Open Banking-tjeneste.
+</p>
+
+<p>
+    Brugeren bestemmer selv, hvilke bankkonti der forbindes, og kan til enhver
+    tid tilbagekalde eller afslutte forbindelsen gennem den relevante bank eller
+    Open Banking-tjeneste.
+</p>
+
+<h2>4. Ingen finansiel rådgivning</h2>
+
+<p>
+    Oplysninger, beregninger, analyser og eventuelle anbefalinger, som
+    applikationen eller tilknyttede AI-funktioner genererer, er alene beregnet
+    som information og overblik.
+</p>
+
+<p>
+    De udgør ikke finansiel, investeringsmæssig, skattemæssig eller juridisk
+    rådgivning.
+</p>
+
+<p>
+    Brugeren er selv ansvarlig for beslutninger, der træffes på baggrund af
+    oplysninger eller analyser fra applikationen.
+</p>
+
+<h2>5. Nøjagtighed</h2>
+
+<p>
+    Der kan forekomme fejl, forsinkelser eller manglende oplysninger i de data,
+    der modt

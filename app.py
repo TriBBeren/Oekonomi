@@ -1109,7 +1109,7 @@ def update_account_balance(
 
 
 # ============================================================
-# FETCH ALL TRANSACTIONS
+# FETCH ALL TRANSACTIONS FROM ENABLE BANKING
 # ============================================================
 
 def fetch_all_transactions(
@@ -1450,8 +1450,7 @@ async def home():
 <meta charset="UTF-8">
 
 <meta name="viewport"
-      content="width=device-width,
-               initial-scale=1.0">
+      content="width=device-width, initial-scale=1.0">
 
 <title>Økonomi</title>
 
@@ -2525,125 +2524,693 @@ Senest opdateret:
 
 
 # ============================================================
+# LOAD TRANSACTIONS FROM SUPABASE
+# ============================================================
+
+def load_transactions_from_supabase():
+
+    response = requests.get(
+
+        supabase_url(
+            "transactions"
+        ),
+
+        headers=supabase_headers(),
+
+        params={
+
+            "select":
+                (
+                    "id,"
+                    "account_uid,"
+                    "transaction_id,"
+                    "booking_date,"
+                    "value_date,"
+                    "amount,"
+                    "currency,"
+                    "creditor,"
+                    "debtor,"
+                    "description,"
+                    "category"
+                ),
+
+            "order":
+                "booking_date.desc,id.desc",
+
+            "limit":
+                "500"
+        },
+
+        timeout=60
+    )
+
+    response.raise_for_status()
+
+    return response.json()
+
+
+# ============================================================
 # TRANSACTIONS
 # ============================================================
 
-@app.get("/transactions")
+@app.get(
+    "/transactions",
+    response_class=HTMLResponse
+)
 async def transactions():
 
-    session = get_active_session()
+    try:
 
-    if not session:
-
-        return JSONResponse(
-
-            {
-
-                "success":
-                    False,
-
-                "error":
-                    (
-                        "No active "
-                        "Enable Banking "
-                        "session. "
-                        "Go to /start "
-                        "first."
-                    )
-            },
-
-            status_code=400
+        transactions_data = (
+            load_transactions_from_supabase()
         )
 
-    session_id = (
-        session.get(
-            "session_id"
-        )
-    )
-
-    if not session_id:
-
-        return JSONResponse(
-
-            {
-
-                "success":
-                    False,
-
-                "error":
-                    "No session_id."
-            },
-
-            status_code=400
+        accounts = (
+            load_accounts_from_supabase()
         )
 
-    accounts = (
-        session.get(
-            "accounts",
-            []
-        )
-    )
+    except Exception as exc:
 
-    result = []
+        return HTMLResponse(
+
+            f"""
+<!DOCTYPE html>
+<html lang="da">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta name="viewport"
+      content="width=device-width, initial-scale=1.0">
+
+<title>Transaktioner</title>
+
+<style>
+
+body {{
+    font-family: Arial, sans-serif;
+    background: #f5f5f5;
+    margin: 30px;
+}}
+
+.container {{
+    max-width: 1400px;
+    margin: auto;
+}}
+
+.card {{
+    background: white;
+    padding: 20px;
+    border-radius: 10px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.08);
+}}
+
+pre {{
+    white-space: pre-wrap;
+}}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="container">
+
+<div class="card">
+
+<h1>Fejl ved hentning af transaktioner</h1>
+
+<pre>
+{escape(str(exc))}
+</pre>
+
+<p>
+<a href="/">Tilbage</a>
+</p>
+
+</div>
+
+</div>
+
+</body>
+
+</html>
+""",
+
+            status_code=500
+        )
+
+
+    # ========================================================
+    # MAP ACCOUNT UID -> ACCOUNT NAME
+    # ========================================================
+
+    account_names = {}
 
     for account in accounts:
 
+        uid = account.get(
+            "uid"
+        )
+
+        if uid:
+
+            account_names[uid] = (
+                account.get("name")
+                or "Ukendt konto"
+            )
+
+
+    # ========================================================
+    # HTML HEADER
+    # ========================================================
+
+    html = """
+
+<!DOCTYPE html>
+<html lang="da">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta name="viewport"
+      content="width=device-width,
+               initial-scale=1.0">
+
+<title>Transaktioner</title>
+
+<style>
+
+body {
+
+    font-family:
+        Arial,
+        sans-serif;
+
+    background:
+        #f5f5f5;
+
+    margin:
+        0;
+
+    padding:
+        20px;
+
+}
+
+.container {
+
+    max-width:
+        1400px;
+
+    margin:
+        auto;
+
+}
+
+.card {
+
+    background:
+        white;
+
+    padding:
+        20px;
+
+    margin-bottom:
+        20px;
+
+    border-radius:
+        10px;
+
+    box-shadow:
+        0 2px 8px
+        rgba(0,0,0,.08);
+
+}
+
+h1 {
+
+    margin-top:
+        0;
+
+}
+
+nav {
+
+    margin-bottom:
+        10px;
+
+}
+
+nav a {
+
+    color:
+        #1463d8;
+
+    text-decoration:
+        none;
+
+    margin-right:
+        14px;
+
+}
+
+nav a:hover {
+
+    text-decoration:
+        underline;
+
+}
+
+.transaction-count {
+
+    color:
+        #666;
+
+    margin-top:
+        12px;
+
+}
+
+.table-container {
+
+    overflow-x:
+        auto;
+
+}
+
+table {
+
+    width:
+        100%;
+
+    border-collapse:
+        collapse;
+
+    min-width:
+        1000px;
+
+}
+
+th {
+
+    text-align:
+        left;
+
+    padding:
+        12px;
+
+    background:
+        #f0f2f5;
+
+    border-bottom:
+        2px solid #ddd;
+
+    white-space:
+        nowrap;
+
+}
+
+td {
+
+    padding:
+        12px;
+
+    border-bottom:
+        1px solid #eee;
+
+    vertical-align:
+        top;
+
+}
+
+tr:hover {
+
+    background:
+        #fafafa;
+
+}
+
+.date {
+
+    white-space:
+        nowrap;
+
+}
+
+.account {
+
+    font-weight:
+        bold;
+
+}
+
+.counterparty {
+
+    max-width:
+        250px;
+
+    word-break:
+        break-word;
+
+}
+
+.description {
+
+    max-width:
+        450px;
+
+    word-break:
+        break-word;
+
+}
+
+.amount {
+
+    text-align:
+        right;
+
+    white-space:
+        nowrap;
+
+    font-weight:
+        bold;
+
+}
+
+.amount.positive {
+
+    color:
+        #16803c;
+
+}
+
+.amount.negative {
+
+    color:
+        #c62828;
+
+}
+
+.category {
+
+    color:
+        #777;
+
+    font-size:
+        13px;
+
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="container">
+
+<div class="card">
+
+<h1>Transaktioner</h1>
+
+<nav>
+
+<a href="/">
+Forside
+</a>
+
+<a href="/dashboard">
+Konti
+</a>
+
+<a href="/transactions">
+Transaktioner
+</a>
+
+<a href="/sync">
+Synkroniser
+</a>
+
+<a href="/logout">
+Log ud
+</a>
+
+</nav>
+
+<div class="transaction-count">
+"""
+
+    html += (
+        f"Viser {len(transactions_data)} "
+        "seneste transaktioner fra databasen"
+    )
+
+    html += """
+
+</div>
+
+</div>
+
+<div class="card">
+
+<div class="table-container">
+
+<table>
+
+<thead>
+
+<tr>
+
+<th>Dato</th>
+
+<th>Konto</th>
+
+<th>Modpart</th>
+
+<th>Beskrivelse</th>
+
+<th>Beløb</th>
+
+<th>Valuta</th>
+
+<th>Kategori</th>
+
+</tr>
+
+</thead>
+
+<tbody>
+
+"""
+
+
+    # ========================================================
+    # TRANSACTION ROWS
+    # ========================================================
+
+    for transaction in transactions_data:
+
+        booking_date = (
+            transaction.get(
+                "booking_date"
+            )
+            or ""
+        )
+
         account_uid = (
-            account.get(
-                "uid"
+            transaction.get(
+                "account_uid"
+            )
+            or ""
+        )
+
+        account_name = (
+            account_names.get(
+                account_uid,
+                "Ukendt konto"
             )
         )
 
+        creditor = (
+            transaction.get(
+                "creditor"
+            )
+            or ""
+        )
+
+        debtor = (
+            transaction.get(
+                "debtor"
+            )
+            or ""
+        )
+
+        description = (
+            transaction.get(
+                "description"
+            )
+            or ""
+        )
+
+        amount = transaction.get(
+            "amount"
+        )
+
+        currency = (
+            transaction.get(
+                "currency"
+            )
+            or ""
+        )
+
+        category = (
+            transaction.get(
+                "category"
+            )
+            or ""
+        )
+
+
+        if debtor:
+
+            counterparty = debtor
+
+        elif creditor:
+
+            counterparty = creditor
+
+        else:
+
+            counterparty = ""
+
+
+        display_date = booking_date
+
         try:
 
-            transaction_data = (
-                fetch_all_transactions(
+            parsed_date = datetime.fromisoformat(
+                str(booking_date)
+            )
 
-                    session_id,
-
-                    account_uid
+            display_date = (
+                parsed_date.strftime(
+                    "%d-%m-%Y"
                 )
             )
 
-            result.append({
+        except Exception:
 
-                "account_uid":
-                    account_uid,
+            pass
 
-                "count":
-                    len(
-                        transaction_data
-                    ),
 
-                "transactions":
-                    transaction_data
-            })
+        try:
 
-        except Exception as exc:
+            amount_number = float(
+                amount
+            )
 
-            result.append({
+            amount_text = (
+                f"{amount_number:,.2f}"
+                .replace(",", "X")
+                .replace(".", ",")
+                .replace("X", ".")
+            )
 
-                "account_uid":
-                    account_uid,
+            if amount_number > 0:
 
-                "count":
-                    0,
+                amount_class = "positive"
 
-                "error":
-                    str(exc),
+                amount_display = (
+                    "+"
+                    + amount_text
+                )
 
-                "transactions":
-                    []
-            })
+            elif amount_number < 0:
 
-    return {
+                amount_class = "negative"
 
-        "success":
-            True,
+                amount_display = (
+                    amount_text
+                )
 
-        "accounts":
-            result
-    }
+            else:
+
+                amount_class = ""
+
+                amount_display = amount_text
+
+        except (
+            TypeError,
+            ValueError
+        ):
+
+            amount_class = ""
+
+            amount_display = ""
+
+
+        html += f"""
+
+<tr>
+
+<td class="date">
+{escape(str(display_date))}
+</td>
+
+<td class="account">
+{escape(str(account_name))}
+</td>
+
+<td class="counterparty">
+{escape(str(counterparty))}
+</td>
+
+<td class="description">
+{escape(str(description))}
+</td>
+
+<td class="amount {amount_class}">
+{escape(str(amount_display))}
+</td>
+
+<td>
+{escape(str(currency))}
+</td>
+
+<td class="category">
+{escape(str(category))}
+</td>
+
+</tr>
+
+"""
+
+
+    html += """
+
+</tbody>
+
+</table>
+
+</div>
+
+</div>
+
+</div>
+
+</body>
+
+</html>
+
+"""
+
+    return HTMLResponse(
+        html
+    )
 
 
 # ============================================================

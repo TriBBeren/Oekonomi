@@ -1,0 +1,16 @@
+name: Automatisk bank-synkronisering
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Synkroniser bankdata
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          curl --fail-with-body --show-error --silent             --max-time 120             "https://oekonomi.onrender.com/auto-sync?token=${CRON_SECRET}"

@@ -2,15 +2,15 @@ import os
 from contextlib import asynccontextmanager
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
-# Prøver at importere psycopg2-binary / psycopg2 sikkert
 try:
     import psycopg2
     from psycopg2.extras import RealDictCursor
 except ImportError:
     raise RuntimeError(
-        "Mangler psycopg2. Tilføj 'psycopg2-binary' til din requirements.txt file."
+        "Mangler psycopg2. Tilføj 'psycopg2-binary' til din requirements.txt fil."
     )
 
 # --- Database Konfiguration ---
@@ -25,7 +25,6 @@ def get_db_connection():
 
 # --- SQL Schema Auto-Migration ---
 def init_db():
-    """Kører SQL-ændringer ved opstart for at sikre korrekt database-struktur."""
     migration_query = """
     CREATE TABLE IF NOT EXISTS transactions (
         id SERIAL PRIMARY KEY,
@@ -96,6 +95,70 @@ class TransactionResponse(BaseModel):
 @app.get("/")
 def read_root():
     return {"status": "ok", "message": "API kører korrekt"}
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def get_dashboard():
+    """Returnerer en enkel HTML-grænseflade til visning og oprettelse af transaktioner."""
+    conn = None
+    rows = []
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, amount, description, category, is_recurring FROM transactions ORDER BY id DESC LIMIT 50"
+            )
+            rows = cur.fetchall()
+    except Exception as e:
+        return f"<h1>Fejl ved indlæsning af data</h1><p>{e}</p>"
+    finally:
+        if conn:
+            conn.close()
+
+    table_rows = "".join(
+        [
+            f"<tr><td>{r['id']}</td><td>{r['description']}</td><td>{r['amount']} kr</td><td>{r['category']}</td><td>{'Ja' if r['is_recurring'] else 'Nej'}</td></tr>"
+            for r in rows
+        ]
+    )
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Dashboard - Transaktioner</title>
+        <style>
+            body {{ font-family: sans-serif; margin: 40px; background-color: #f4f4f9; color: #333; }}
+            h1 {{ color: #2c3e50; }}
+            table {{ width: 100%; border-collapse: collapse; margin-top: 20px; background: white; }}
+            th, td {{ padding: 12px; border: 1px solid #ddd; text-align: left; }}
+            th {{ background-color: #2c3e50; color: white; }}
+            tr:nth-child(even) {{ background-color: #f9f9f9; }}
+        </style>
+    </head>
+    <body>
+        <h1>Transaktionsdashboard</h1>
+        <p><a href="/docs">Gå til API-dokumentation (Swagger UI)</a></p>
+        
+        <h2>Seneste transaktioner</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Beskrivelse</th>
+                    <th>Beløb</th>
+                    <th>Kategori</th>
+                    <th>Fast udgift</th>
+                </tr>
+            </thead>
+            <tbody>
+                {table_rows if table_rows else '<tr><td colspan="5">Ingen transaktioner fundet.</td></tr>'}
+            </tbody>
+        </table>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
 
 
 @app.get("/transactions", response_model=List[TransactionResponse])

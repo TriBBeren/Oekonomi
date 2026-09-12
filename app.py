@@ -17,7 +17,48 @@ API_URL = "https://api.enablebanking.com"
 # Midlertidig lagring.
 # Vi laver rigtig permanent database senere.
 current_session = None
+def fetch_all_transactions(account_uid):
+    all_transactions = []
+    continuation_key = None
 
+    params = {
+        "date_from": "2010-01-01"
+    }
+
+    while True:
+        if continuation_key:
+            params["continuation_key"] = continuation_key
+
+        response = requests.get(
+            f"{API_URL}/accounts/{account_uid}/transactions",
+            headers=eb_headers(),
+            params=params,
+            timeout=60
+        )
+
+        if response.status_code != 200:
+            return {
+                "error": True,
+                "status_code": response.status_code,
+                "response": response.text,
+                "transactions": all_transactions
+            }
+
+        data = response.json()
+
+        all_transactions.extend(
+            data.get("transactions", [])
+        )
+
+        continuation_key = data.get("continuation_key")
+
+        if not continuation_key:
+            break
+
+    return {
+        "error": False,
+        "transactions": all_transactions
+    }
 
 def create_jwt():
     with open(PRIVATE_KEY_FILE, "r") as f:
@@ -239,3 +280,23 @@ def dashboard():
     </body>
     </html>
     """)
+
+@app.get("/transactions")
+def transactions():
+    if not current_session:
+        return {
+            "error": "Ingen aktiv bankforbindelse. Gå til /start først."
+        }
+
+    result = {}
+
+    for account in current_session.get("accounts", []):
+        uid = account.get("uid")
+
+        result[uid] = {
+            "iban": account.get("account_id", {}).get("iban"),
+            "name": account.get("name"),
+            "transactions": fetch_all_transactions(uid)
+        }
+
+    return result

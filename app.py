@@ -73,16 +73,24 @@ pending_state = None
 # ============================================================
 
 if not APP_USERNAME:
-    print("WARNING: APP_USERNAME is not configured.")
+    print(
+        "WARNING: APP_USERNAME is not configured."
+    )
 
 if not APP_PASSWORD:
-    print("WARNING: APP_PASSWORD is not configured.")
+    print(
+        "WARNING: APP_PASSWORD is not configured."
+    )
 
 if not SUPABASE_SERVICE_KEY:
-    print("WARNING: SUPABASE_SERVICE_KEY is not configured.")
+    print(
+        "WARNING: SUPABASE_SERVICE_KEY is not configured."
+    )
 
 if not CRON_SECRET:
-    print("WARNING: CRON_SECRET is not configured.")
+    print(
+        "WARNING: CRON_SECRET is not configured."
+    )
 
 
 # ============================================================
@@ -257,43 +265,60 @@ body {
 
 .login {
     background: white;
+
     width: 340px;
+
     padding: 30px;
+
     border-radius: 12px;
+
     box-shadow: 0 4px 20px rgba(0,0,0,.12);
 }
 
 h1 {
     margin-top: 0;
     margin-bottom: 25px;
+
     text-align: center;
 }
 
 label {
     display: block;
+
     margin-top: 15px;
     margin-bottom: 5px;
+
     font-weight: bold;
 }
 
 input {
     box-sizing: border-box;
+
     width: 100%;
+
     padding: 11px;
+
     border: 1px solid #ccc;
     border-radius: 6px;
+
     font-size: 16px;
 }
 
 button {
     width: 100%;
+
     margin-top: 25px;
+
     padding: 12px;
+
     border: 0;
     border-radius: 6px;
+
     background: #1463d8;
     color: white;
+
     font-size: 16px;
+
     cursor: pointer;
 }
 
@@ -303,8 +328,11 @@ button:hover {
 
 #error {
     color: #b00020;
+
     margin-top: 15px;
+
     text-align: center;
+
     display: none;
 }
 
@@ -527,9 +555,13 @@ def create_jwt():
     }
 
     token = jwt.encode(
+
         payload,
+
         private_key,
+
         algorithm="RS256",
+
         headers={
             "kid": APP_ID
         }
@@ -918,6 +950,11 @@ def save_accounts(
 
             response.raise_for_status()
 
+            print(
+                f"Updated account {iban} "
+                f"with UID {uid}."
+            )
+
         else:
 
             response = requests.post(
@@ -959,6 +996,11 @@ def save_accounts(
 
             response.raise_for_status()
 
+            print(
+                f"Inserted new account {iban} "
+                f"with UID {uid}."
+            )
+
 
 # ============================================================
 # UPDATE BALANCE
@@ -989,6 +1031,7 @@ def update_account_balance(
         ) == "closing_available":
 
             selected = balance
+
             break
 
     if selected is None:
@@ -1000,6 +1043,7 @@ def update_account_balance(
             ) == "interim_available":
 
                 selected = balance
+
                 break
 
     if selected is None:
@@ -1080,7 +1124,9 @@ def fetch_all_transactions(
     while True:
 
         params = {
-            "date_from": "2010-01-01"
+
+            "date_from":
+                "2010-01-01"
         }
 
         if continuation_key:
@@ -1124,6 +1170,7 @@ def fetch_all_transactions(
         )
 
         if not continuation_key:
+
             break
 
     return all_transactions
@@ -1149,8 +1196,11 @@ def make_transaction_id(
         )
 
     raw = json.dumps(
+
         transaction,
+
         sort_keys=True,
+
         default=str
     )
 
@@ -1202,12 +1252,28 @@ def convert_transaction(
         or []
     )
 
-    amount = amount_data.get(
-        "amount"
+    booking_date = (
+        transaction.get(
+            "booking_date"
+        )
     )
 
-    currency = amount_data.get(
-        "currency"
+    value_date = (
+        transaction.get(
+            "value_date"
+        )
+    )
+
+    amount = (
+        amount_data.get(
+            "amount"
+        )
+    )
+
+    currency = (
+        amount_data.get(
+            "currency"
+        )
     )
 
     if isinstance(
@@ -1215,8 +1281,8 @@ def convert_transaction(
         dict
     ):
 
-        creditor_name = creditor.get(
-            "name"
+        creditor_name = (
+            creditor.get("name")
         )
 
     else:
@@ -1228,8 +1294,8 @@ def convert_transaction(
         dict
     ):
 
-        debtor_name = debtor.get(
-            "name"
+        debtor_name = (
+            debtor.get("name")
         )
 
     else:
@@ -1272,14 +1338,10 @@ def convert_transaction(
             transaction_id,
 
         "booking_date":
-            transaction.get(
-                "booking_date"
-            ),
+            booking_date,
 
         "value_date":
-            transaction.get(
-                "value_date"
-            ),
+            value_date,
 
         "amount":
             amount,
@@ -1313,6 +1375,7 @@ def save_transactions(
 ):
 
     if not transactions:
+
         return 0
 
     saved = 0
@@ -1396,20 +1459,27 @@ async def home():
 
 body {
     font-family: Arial, sans-serif;
+
     margin: 40px;
+
     background: #f5f5f5;
 }
 
 .container {
     max-width: 900px;
+
     margin: auto;
 }
 
 .card {
     background: white;
+
     padding: 25px;
+
     margin-bottom: 20px;
+
     border-radius: 10px;
+
     box-shadow:
         0 2px 8px
         rgba(0,0,0,.08);
@@ -1421,11 +1491,17 @@ h1 {
 
 a.button {
     display: inline-block;
+
     padding: 12px 18px;
+
     margin: 5px;
+
     border-radius: 6px;
+
     background: #1463d8;
+
     color: white;
+
     text-decoration: none;
 }
 
@@ -1475,6 +1551,7 @@ Log ud
 </a>
 
 </div>
+
 
 <div class="card">
 
@@ -1566,6 +1643,7 @@ async def start():
         return JSONResponse(
 
             {
+
                 "success":
                     False,
 
@@ -1592,6 +1670,7 @@ async def start():
         return JSONResponse(
 
             {
+
                 "success":
                     False,
 
@@ -1610,7 +1689,9 @@ async def start():
         )
 
     return RedirectResponse(
+
         auth_url,
+
         status_code=303
     )
 
@@ -1793,6 +1874,7 @@ async def callback(
     try:
 
         save_accounts(
+
             current_session.get(
                 "accounts",
                 []
@@ -1829,7 +1911,9 @@ async def callback(
         )
 
     return RedirectResponse(
+
         "/dashboard",
+
         status_code=303
     )
 
@@ -1908,9 +1992,34 @@ async def dashboard():
 
 <title>Konti</title>
 
+<style>
+
+body {{
+    font-family: Arial, sans-serif;
+    background: #f5f5f5;
+    margin: 30px;
+}}
+
+.container {{
+    max-width: 1100px;
+    margin: auto;
+}}
+
+.card {{
+    background: white;
+    padding: 20px;
+    border-radius: 10px;
+}}
+
+</style>
+
 </head>
 
 <body>
+
+<div class="container">
+
+<div class="card">
 
 <h1>Fejl ved hentning af konti</h1>
 
@@ -1922,6 +2031,10 @@ async def dashboard():
 <a href="/">Tilbage</a>
 </p>
 
+</div>
+
+</div>
+
 </body>
 
 </html>
@@ -1930,6 +2043,10 @@ async def dashboard():
             status_code=500
         )
 
+
+    # ========================================================
+    # CALCULATE TOTAL BALANCE
+    # ========================================================
 
     total_balance = 0.0
 
@@ -1963,6 +2080,10 @@ async def dashboard():
         + " kr."
     )
 
+
+    # ========================================================
+    # HTML
+    # ========================================================
 
     html = """
 
@@ -2029,18 +2150,33 @@ body {
 }
 
 h1 {
-    margin-top: 0;
+
+    margin-top:
+        0;
+
 }
 
 .total-label {
-    font-size: 16px;
-    color: #666;
+
+    font-size:
+        16px;
+
+    color:
+        #666;
+
 }
 
 .total {
-    font-size: 32px;
-    font-weight: bold;
-    margin-top: 8px;
+
+    font-size:
+        32px;
+
+    font-weight:
+        bold;
+
+    margin-top:
+        8px;
+
 }
 
 .account-grid {
@@ -2128,7 +2264,10 @@ h1 {
 }
 
 .negative .balance {
-    color: #c62828;
+
+    color:
+        #c62828;
+
 }
 
 .currency {
@@ -2155,7 +2294,10 @@ h1 {
 }
 
 nav {
-    margin-bottom: 0;
+
+    margin-bottom:
+        0;
+
 }
 
 nav a {
@@ -2172,7 +2314,10 @@ nav a {
 }
 
 nav a:hover {
-    text-decoration: underline;
+
+    text-decoration:
+        underline;
+
 }
 
 </style>
@@ -2233,6 +2378,10 @@ Samlet saldo
 """
 
 
+    # ========================================================
+    # ACCOUNT CARDS
+    # ========================================================
+
     for account in accounts:
 
         name = str(
@@ -2259,6 +2408,7 @@ Samlet saldo
             or ""
         )
 
+
         try:
 
             balance_number = float(
@@ -2284,10 +2434,14 @@ Samlet saldo
             ValueError
         ):
 
-            balance_text = "Ingen saldo"
+            balance_text = (
+                "Ingen saldo"
+            )
 
             negative_class = ""
 
+
+        # Format timestamp for display
 
         display_updated = updated_at
 
@@ -2318,24 +2472,34 @@ Samlet saldo
 <div class="account{negative_class}">
 
 <div class="account-name">
+
 {escape(name)}
+
 </div>
 
 <div class="iban">
+
 {escape(iban)}
+
 </div>
 
 <div class="balance">
+
 {escape(balance_text)}
+
 </div>
 
 <div class="currency">
+
 Valuta: {escape(currency)}
+
 </div>
 
 <div class="updated">
+
 Senest opdateret:
 {escape(display_updated)}
+
 </div>
 
 </div>
@@ -2358,655 +2522,128 @@ Senest opdateret:
     return HTMLResponse(
         html
     )
-
-
-# ============================================================
-# TRANSACTIONS - LOAD FROM SUPABASE
-# ============================================================
-
-def load_transactions_from_supabase():
-
-    response = requests.get(
-
-        supabase_url(
-            "transactions"
-        ),
-
-        headers=supabase_headers(),
-
-        params={
-
-            "select":
-                (
-                    "id,"
-                    "account_uid,"
-                    "transaction_id,"
-                    "booking_date,"
-                    "value_date,"
-                    "amount,"
-                    "currency,"
-                    "creditor,"
-                    "debtor,"
-                    "description,"
-                    "category"
-                ),
-
-            "order":
-                "booking_date.desc,id.desc",
-
-            "limit":
-                "500"
-        },
-
-        timeout=60
-    )
-
-    response.raise_for_status()
-
-    return response.json()
 
 
 # ============================================================
 # TRANSACTIONS
 # ============================================================
 
-@app.get(
-    "/transactions",
-    response_class=HTMLResponse
-)
+@app.get("/transactions")
 async def transactions():
 
-    try:
+    session = get_active_session()
 
-        transactions_data = (
-            load_transactions_from_supabase()
+    if not session:
+
+        return JSONResponse(
+
+            {
+
+                "success":
+                    False,
+
+                "error":
+                    (
+                        "No active "
+                        "Enable Banking "
+                        "session. "
+                        "Go to /start "
+                        "first."
+                    )
+            },
+
+            status_code=400
         )
 
-        accounts = (
-            load_accounts_from_supabase()
+    session_id = (
+        session.get(
+            "session_id"
+        )
+    )
+
+    if not session_id:
+
+        return JSONResponse(
+
+            {
+
+                "success":
+                    False,
+
+                "error":
+                    "No session_id."
+            },
+
+            status_code=400
         )
 
-    except Exception as exc:
-
-        return HTMLResponse(
-
-            f"""
-<!DOCTYPE html>
-<html lang="da">
-
-<head>
-
-<meta charset="UTF-8">
-
-<meta name="viewport"
-      content="width=device-width, initial-scale=1.0">
-
-<title>Transaktioner</title>
-
-</head>
-
-<body>
-
-<h1>Fejl ved hentning af transaktioner</h1>
-
-<pre>
-{escape(str(exc))}
-</pre>
-
-<p>
-<a href="/">Tilbage</a>
-</p>
-
-</body>
-
-</html>
-""",
-
-            status_code=500
+    accounts = (
+        session.get(
+            "accounts",
+            []
         )
+    )
 
-
-    # ========================================================
-    # MAP ACCOUNT UID TO ACCOUNT NAME
-    # ========================================================
-
-    account_names = {}
+    result = []
 
     for account in accounts:
 
-        uid = account.get(
-            "uid"
-        )
-
-        if uid:
-
-            account_names[uid] = (
-                account.get("name")
-                or "Ukendt konto"
-            )
-
-
-    # ========================================================
-    # HTML HEADER
-    # ========================================================
-
-    html = """
-
-<!DOCTYPE html>
-<html lang="da">
-
-<head>
-
-<meta charset="UTF-8">
-
-<meta name="viewport"
-      content="width=device-width,
-               initial-scale=1.0">
-
-<title>Transaktioner</title>
-
-<style>
-
-body {
-
-    font-family:
-        Arial,
-        sans-serif;
-
-    background:
-        #f5f5f5;
-
-    margin:
-        0;
-
-    padding:
-        20px;
-
-}
-
-.container {
-
-    max-width:
-        1400px;
-
-    margin:
-        auto;
-
-}
-
-.card {
-
-    background:
-        white;
-
-    padding:
-        20px;
-
-    margin-bottom:
-        20px;
-
-    border-radius:
-        10px;
-
-    box-shadow:
-        0 2px 8px
-        rgba(0,0,0,.08);
-
-}
-
-h1 {
-    margin-top: 0;
-}
-
-nav {
-    margin-bottom: 0;
-}
-
-nav a {
-
-    color:
-        #1463d8;
-
-    text-decoration:
-        none;
-
-    margin-right:
-        14px;
-
-}
-
-nav a:hover {
-    text-decoration: underline;
-}
-
-.transaction-count {
-
-    color:
-        #666;
-
-    margin-top:
-        10px;
-
-}
-
-.table-container {
-
-    overflow-x:
-        auto;
-
-}
-
-table {
-
-    width:
-        100%;
-
-    border-collapse:
-        collapse;
-
-    min-width:
-        900px;
-
-}
-
-th {
-
-    text-align:
-        left;
-
-    padding:
-        12px;
-
-    background:
-        #f0f2f5;
-
-    border-bottom:
-        2px solid #ddd;
-
-    white-space:
-        nowrap;
-
-}
-
-td {
-
-    padding:
-        12px;
-
-    border-bottom:
-        1px solid #eee;
-
-    vertical-align:
-        top;
-
-}
-
-tr:hover {
-
-    background:
-        #fafafa;
-
-}
-
-.date {
-
-    white-space:
-        nowrap;
-
-}
-
-.account {
-
-    font-weight:
-        bold;
-
-}
-
-.amount {
-
-    text-align:
-        right;
-
-    white-space:
-        nowrap;
-
-    font-weight:
-        bold;
-
-}
-
-.amount.positive {
-
-    color:
-        #16803c;
-
-}
-
-.amount.negative {
-
-    color:
-        #c62828;
-
-}
-
-.description {
-
-    max-width:
-        450px;
-
-    word-break:
-        break-word;
-
-}
-
-.counterparty {
-
-    max-width:
-        250px;
-
-    word-break:
-        break-word;
-
-}
-
-.category {
-
-    color:
-        #777;
-
-    font-size:
-        13px;
-
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="container">
-
-<div class="card">
-
-<h1>Transaktioner</h1>
-
-<nav>
-
-<a href="/">
-Forside
-</a>
-
-<a href="/dashboard">
-Konti
-</a>
-
-<a href="/sync">
-Synkroniser
-</a>
-
-<a href="/logout">
-Log ud
-</a>
-
-</nav>
-
-<div class="transaction-count">
-"""
-
-    html += (
-        f"Viser de {len(transactions_data)} "
-        "seneste transaktioner"
-    )
-
-    html += """
-
-</div>
-
-</div>
-
-<div class="card">
-
-<div class="table-container">
-
-<table>
-
-<thead>
-
-<tr>
-
-<th>Dato</th>
-
-<th>Konto</th>
-
-<th>Modpart</th>
-
-<th>Beskrivelse</th>
-
-<th>Beløb</th>
-
-<th>Valuta</th>
-
-<th>Kategori</th>
-
-</tr>
-
-</thead>
-
-<tbody>
-
-"""
-
-
-    # ========================================================
-    # TRANSACTION ROWS
-    # ========================================================
-
-    for transaction in transactions_data:
-
-        booking_date = (
-            transaction.get(
-                "booking_date"
-            )
-            or ""
-        )
-
         account_uid = (
-            transaction.get(
-                "account_uid"
-            )
-            or ""
-        )
-
-        account_name = (
-            account_names.get(
-                account_uid,
-                "Ukendt konto"
+            account.get(
+                "uid"
             )
         )
-
-        creditor = (
-            transaction.get(
-                "creditor"
-            )
-            or ""
-        )
-
-        debtor = (
-            transaction.get(
-                "debtor"
-            )
-            or ""
-        )
-
-        description = (
-            transaction.get(
-                "description"
-            )
-            or ""
-        )
-
-        amount = transaction.get(
-            "amount"
-        )
-
-        currency = (
-            transaction.get(
-                "currency"
-            )
-            or ""
-        )
-
-        category = (
-            transaction.get(
-                "category"
-            )
-            or ""
-        )
-
-
-        # Determine visible counterparty
-
-        if debtor:
-
-            counterparty = debtor
-
-        elif creditor:
-
-            counterparty = creditor
-
-        else:
-
-            counterparty = ""
-
-
-        # Format date
-
-        display_date = booking_date
 
         try:
 
-            parsed_date = datetime.fromisoformat(
-                str(booking_date)
-            )
+            transaction_data = (
+                fetch_all_transactions(
 
-            display_date = (
-                parsed_date.strftime(
-                    "%d-%m-%Y"
+                    session_id,
+
+                    account_uid
                 )
             )
 
-        except Exception:
+            result.append({
 
-            pass
+                "account_uid":
+                    account_uid,
 
+                "count":
+                    len(
+                        transaction_data
+                    ),
 
-        # Format amount
+                "transactions":
+                    transaction_data
+            })
 
-        try:
+        except Exception as exc:
 
-            amount_number = float(
-                amount
-            )
+            result.append({
 
-            amount_text = (
-                f"{amount_number:,.2f}"
-                .replace(",", "X")
-                .replace(".", ",")
-                .replace("X", ".")
-            )
+                "account_uid":
+                    account_uid,
 
-            if amount_number > 0:
+                "count":
+                    0,
 
-                amount_class = "positive"
+                "error":
+                    str(exc),
 
-                amount_display = (
-                    "+"
-                    + amount_text
-                )
+                "transactions":
+                    []
+            })
 
-            elif amount_number < 0:
+    return {
 
-                amount_class = "negative"
+        "success":
+            True,
 
-                amount_display = (
-                    amount_text
-                )
-
-            else:
-
-                amount_class = ""
-
-                amount_display = amount_text
-
-        except (
-            TypeError,
-            ValueError
-        ):
-
-            amount_class = ""
-
-            amount_display = ""
-
-
-        html += f"""
-
-<tr>
-
-<td class="date">
-{escape(str(display_date))}
-</td>
-
-<td class="account">
-{escape(str(account_name))}
-</td>
-
-<td class="counterparty">
-{escape(str(counterparty))}
-</td>
-
-<td class="description">
-{escape(str(description))}
-</td>
-
-<td class="amount {amount_class}">
-{escape(str(amount_display))}
-</td>
-
-<td>
-{escape(str(currency))}
-</td>
-
-<td class="category">
-{escape(str(category))}
-</td>
-
-</tr>
-
-"""
-
-
-    html += """
-
-</tbody>
-
-</table>
-
-</div>
-
-</div>
-
-</div>
-
-</body>
-
-</html>
-
-"""
-
-    return HTMLResponse(
-        html
-    )
+        "accounts":
+            result
+    }
 
 
 # ============================================================
@@ -3041,6 +2678,13 @@ def perform_sync():
             []
         )
     )
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # Enable Banking can assign new UIDs when a new session
+    # is created. Match the accounts by IBAN first so that
+    # the existing Supabase account rows receive the new UID.
+    # --------------------------------------------------------
 
     save_accounts(accounts)
 
@@ -3121,6 +2765,7 @@ def perform_sync():
                 )
 
             saved = save_transactions(
+
                 converted_transactions
             )
 

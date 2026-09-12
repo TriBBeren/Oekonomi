@@ -2600,6 +2600,26 @@ def get_transaction_date(
 
 
 # ============================================================
+# CHECK INTERNAL FUTURE TRANSFER
+# ============================================================
+
+def is_internal_future_transfer(
+    transaction
+):
+
+    description = str(
+        transaction.get(
+            "description"
+        )
+        or ""
+    ).strip()
+
+    return description.lower().startswith(
+        "til "
+    )
+
+
+# ============================================================
 # FORMAT TRANSACTION ROW
 # ============================================================
 
@@ -2908,6 +2928,8 @@ pre {{
 
     future_transactions = []
 
+    hidden_internal_future_transactions = 0
+
     for transaction in transactions_data:
 
         transaction_date = get_transaction_date(
@@ -2918,6 +2940,14 @@ pre {{
             transaction_date
             and transaction_date > today
         ):
+
+            if is_internal_future_transfer(
+                transaction
+            ):
+
+                hidden_internal_future_transactions += 1
+
+                continue
 
             future_transactions.append(
                 transaction
@@ -3281,6 +3311,14 @@ Kommende betalinger
         f"{len(future_transactions)} "
         "transaktioner med fremtidig dato."
     )
+
+    if hidden_internal_future_transactions:
+
+        html += (
+            f" "
+            f"{hidden_internal_future_transactions} "
+            "automatiske interne overførsler er skjult."
+        )
 
     html += """
 

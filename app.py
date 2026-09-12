@@ -1,10 +1,11 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import PlainTextResponse, RedirectResponse
+from fastapi import FastAPI
+from fastapi.responses import PlainTextResponse, RedirectResponse, HTMLResponse
 import jwt
 import time
 import requests
 import uuid
 from datetime import datetime, timedelta, timezone
+from html import escape
 
 app = FastAPI()
 
@@ -12,6 +13,10 @@ APP_ID = "a2a55118-0acc-4c22-a836-ea8f6f600983"
 PRIVATE_KEY_FILE = "/etc/secrets/enable_banking_private_key.pem"
 REDIRECT_URL = "https://oekonomi.onrender.com/callback"
 API_URL = "https://api.enablebanking.com"
+
+# Midlertidig lagring.
+# Vi laver rigtig permanent database senere.
+current_session = None
 
 
 def create_jwt():
@@ -50,9 +55,12 @@ def eb_headers():
 
 @app.get("/")
 def home():
-    return PlainTextResponse(
-        "Privat Økonomi backend kører. Gå til /start for at forbinde banken."
-    )
+    return HTMLResponse("""
+    <h1>Privat Økonomi</h1>
+    <p>Backend kører.</p>
+    <p><a href="/start">Forbind til banken</a></p>
+    <p><a href="/dashboard">Åbn økonomi-dashboard</a></p>
+    """)
 
 
 @app.get("/start")
@@ -65,6 +73,8 @@ def start():
 
     data = {
         "access": {
+            "balances": True,
+            "transactions": True,
             "valid_until": access_valid_until
         },
         "aspsp": {
@@ -102,6 +112,8 @@ def callback(
     error: str | None = None,
     error_description: str | None = None
 ):
+    global current_session
+
     if error:
         return {
             "error": error,
@@ -129,10 +141,101 @@ def callback(
             "response": response.text
         }
 
-    result = response.json()
+    current_session = response.json()
 
-    return {
-        "message": "Bankforbindelsen er oprettet",
-        "session_id": result.get("session_id"),
-        "accounts": result.get("accounts", [])
-    }
+    return RedirectResponse(url="/dashboard")
+
+
+@app.get("/dashboard")
+def dashboard():
+    if not current_session:
+        return HTMLResponse("""
+        <h1>Privat Økonomi</h1>
+        <p>Der er ingen aktiv bankforbindelse.</p>
+        <p><a href="/start">Forbind til banken</a></p>
+        """)
+
+    accounts = current_session.get("accounts", [])
+
+    rows = []
+
+    for account in accounts:
+        uid = account.get("uid")
+
+        balance_response = requests.get(
+            f"{API_URL}/accounts/{uid}/balances",
+            headers=eb_headers(),
+            timeout=30
+        )
+
+        if balance_response.status_code == 200:
+            balance_data = balance_response.json()
+
+            balances = balance_data.get("balances", [])
+
+            balance_text = "<br>".join(
+                f"{escape(str(b.get('name', 'Saldo')))}: "
+                f"{escape(str(b.get('balance_amount', {}).get('amount', '')))} "
+                f"{escape(str(b.get('balance_amount', {}).get('currency', '')))}"
+                for b in balances
+            )
+
+        else:
+            balance_text = (
+                f"Fejl ved hentning af saldo "
+                f"({balance_response.status_code})"
+            )
+
+        rows.append(f"""
+        <tr>
+            <td>{escape(str(account.get('uid', '')))}</td>
+            <td>{escape(str(account.get('iban', '')))}</td>
+            <td>{balance_text}</td>
+        </tr>
+        """)
+
+    return HTMLResponse(f"""
+    <!DOCTYPE html>
+    <html lang="da">
+    <head>
+        <meta charset="UTF-8">
+        <title>Privat Økonomi</title>
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                margin: 40px;
+            }}
+            table {{
+                border-collapse: collapse;
+                width: 100%;
+            }}
+            th, td {{
+                border: 1px solid #ccc;
+                padding: 10px;
+                text-align: left;
+            }}
+            th {{
+                background: #eee;
+            }}
+        </style>
+    </head>
+    <body>
+        <h1>Privat Økonomi</h1>
+
+        <h2>Bankkonti</h2>
+
+        <table>
+            <tr>
+                <th>Account ID</th>
+                <th>IBAN</th>
+                <th>Saldo</th>
+            </tr>
+            {''.join(rows)}
+        </table>
+
+        <p>
+            <a href="/start">Opdater bankforbindelse</a>
+        </p>
+    </body>
+    </html>
+    """)

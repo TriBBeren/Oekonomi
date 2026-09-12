@@ -1449,8 +1449,7 @@ async def home():
 
 <meta charset="UTF-8">
 
-<meta name="viewport"
-      content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 
 <title>Økonomi</title>
 
@@ -2614,8 +2613,23 @@ def is_internal_future_transfer(
         or ""
     ).strip()
 
-    return description.lower().startswith(
+    if description.lower().startswith(
         "til "
+    ):
+
+        return True
+
+    internal_transfer_descriptions = {
+        "budgetoverførsel",
+        "boliglån køb",
+        "forbrugskonto susan",
+        "forbrugskonto morten",
+        "elbillån",
+        "børneopsparing"
+    }
+
+    return description.lower() in (
+        internal_transfer_descriptions
     )
 
 
@@ -2836,8 +2850,7 @@ async def transactions():
 
 <meta charset="UTF-8">
 
-<meta name="viewport"
-      content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 
 <title>Transaktioner</title>
 

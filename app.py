@@ -1,4 +1,3 @@
-```python
 import os
 import json
 import time
@@ -4916,4 +4915,3 @@ window.addEventListener(
 
 </html>
 """
-```

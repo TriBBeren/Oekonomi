@@ -849,9 +849,6 @@ def save_accounts(
         # ----------------------------------------------------
         # 2. Check whether this new Enable Banking UID
         #    already exists in Supabase.
-        #
-        #    This can happen because the previous broken
-        #    version already created the 10 temporary rows.
         # ----------------------------------------------------
 
         lookup_uid = requests.get(
@@ -2324,6 +2321,18 @@ def perform_sync():
             []
         )
     )
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # Enable Banking can assign new UIDs when a new session
+    # is created. Match the accounts by IBAN first so that
+    # the existing Supabase account rows receive the new UID.
+    #
+    # This also removes the old temporary NULL-account rows
+    # created by the previous broken version.
+    # --------------------------------------------------------
+
+    save_accounts(accounts)
 
     result = []
 

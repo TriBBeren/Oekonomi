@@ -384,18 +384,65 @@ def enable_banking_post(path, payload, timeout=120):
 
 
 def save_bank_session(session_data):
+    """
+    Gemmer Enable Banking-session uden 409 Conflict.
+
+    Sessionen identificeres via session_id.
+
+    Hvis session_id allerede findes:
+        PATCH eksisterende række.
+
+    Hvis session_id ikke findes:
+        POST ny række.
+    """
+
     if not session_data or not session_data.get("session_id"):
         raise Exception("Ugyldig session data.")
 
-    supabase_post(
+    session_id = str(session_data["session_id"])
+
+    payload = {
+        "session_id": session_id,
+        "session_data": session_data,
+        "status": "active",
+        "updated_at": iso_now(),
+    }
+
+    # Find eksisterende session via session_id.
+    existing = supabase_get(
         "bank_sessions",
         {
-            "session_id": session_data["session_id"],
-            "session_data": session_data,
-            "status": "active",
-            "updated_at": iso_now(),
+            "select": "id,session_id,status,updated_at",
+            "session_id": f"eq.{session_id}",
+            "limit": "1"
         }
     )
+
+    if existing:
+        database_id = existing[0].get("id")
+
+        if database_id is None:
+            raise Exception(
+                f"Kunne ikke finde database-id for eksisterende "
+                f"bank-session {session_id}."
+            )
+
+        # Sessionen findes allerede -> opdater den.
+        supabase_patch(
+            "bank_sessions",
+            {
+                "id": f"eq.{database_id}"
+            },
+            payload
+        )
+
+    else:
+        # Sessionen findes ikke -> opret den.
+        supabase_post(
+            "bank_sessions",
+            payload,
+            prefer="return=minimal"
+        )
 
 
 def load_bank_session():
@@ -527,7 +574,6 @@ def save_accounts(accounts):
 
         existing = []
 
-        # Første valg: find kontoen via IBAN.
         if iban:
             existing = supabase_get(
                 "accounts",
@@ -538,7 +584,6 @@ def save_accounts(accounts):
                 }
             )
 
-        # Fallback: hvis IBAN ikke findes, find via Enable Banking uid.
         if not existing and uid:
             existing = supabase_get(
                 "accounts",
@@ -558,8 +603,6 @@ def save_accounts(accounts):
         }
 
         if existing:
-            # Kontoen findes allerede.
-            # Opdater den i stedet for at forsøge INSERT.
             database_id = existing[0].get("id")
 
             if database_id is None:
@@ -577,7 +620,6 @@ def save_accounts(accounts):
             )
 
         else:
-            # Kontoen findes ikke endnu.
             supabase_post(
                 "accounts",
                 payload

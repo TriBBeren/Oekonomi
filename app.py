@@ -384,18 +384,6 @@ def enable_banking_post(path, payload, timeout=120):
 
 
 def save_bank_session(session_data):
-    """
-    Gemmer Enable Banking-session uden 409 Conflict.
-
-    Sessionen identificeres via session_id.
-
-    Hvis session_id allerede findes:
-        PATCH eksisterende række.
-
-    Hvis session_id ikke findes:
-        POST ny række.
-    """
-
     if not session_data or not session_data.get("session_id"):
         raise Exception("Ugyldig session data.")
 
@@ -408,7 +396,6 @@ def save_bank_session(session_data):
         "updated_at": iso_now(),
     }
 
-    # Find eksisterende session via session_id.
     existing = supabase_get(
         "bank_sessions",
         {
@@ -427,7 +414,6 @@ def save_bank_session(session_data):
                 f"bank-session {session_id}."
             )
 
-        # Sessionen findes allerede -> opdater den.
         supabase_patch(
             "bank_sessions",
             {
@@ -437,7 +423,6 @@ def save_bank_session(session_data):
         )
 
     else:
-        # Sessionen findes ikke -> opret den.
         supabase_post(
             "bank_sessions",
             payload,
@@ -539,23 +524,9 @@ def authorize_enable_banking_session(code):
 # ------------------------- ACCOUNT / TRANSACTIONS -------------------------
 
 def save_accounts(accounts):
-    """
-    Gemmer Enable Banking-konti i Supabase uden 409-konflikter.
-
-    Konti identificeres primært via IBAN.
-    Hvis IBAN mangler, bruges Enable Banking uid.
-
-    Eksisterende konto:
-        PATCH
-
-    Ny konto:
-        POST
-    """
-
     saved = 0
 
     for account in accounts or []:
-
         uid = account.get("uid")
 
         account_id = account.get("account_id") or {}
@@ -1935,6 +1906,14 @@ Brug kun oplysningerne i data og opfind ikke noget. Svar kun JSON: {{"insights":
         }
 
     except Exception as e:
+        # VIGTIGT:
+        # Den tidligere kode skjulte den egentlige OpenAI-fejl.
+        # Denne linje gør den synlig i Render Logs.
+        print(
+            f"AI INSIGHTS FEJL: {repr(e)}",
+            flush=True
+        )
+
         return {
             "success": False,
             "insights": [
